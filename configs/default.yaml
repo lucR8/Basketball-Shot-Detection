@@ -1,0 +1,17 @@
+video:
+  input_path: "data/input/sample.mp4"
+  output_path: "data/output/annotated.mp4"
+  max_frames: 0        # 0 = no limit
+  draw: true
+
+yolo:
+  weights: "yolov8n.pt"   # on changera vers un modèle ball/rim plus tard
+  conf: 0.25
+  iou: 0.45
+  imgsz: 640
+  device: "cpu"           # "0" si GPU NVIDIA
+  classes: []             # [] = toutes classes, sinon liste d'IDs
+
+runtime:
+  save_json: true
+  json_path: "data/output/detections.json"

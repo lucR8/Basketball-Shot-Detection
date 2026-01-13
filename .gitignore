@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+
+data/input/
+data/output/
+models/
+runs/
+notebooks/
+
+.ipynb_checkpoints/
+.DS_Store
