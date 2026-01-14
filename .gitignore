@@ -1,12 +1,14 @@
 __pycache__/
 *.pyc
-.venv/
+venv/
 
 data/input/
 data/output/
-models/
 runs/
 notebooks/
+
+data/roboflow/
+# Too large to track
 
 .ipynb_checkpoints/
 .DS_Store
