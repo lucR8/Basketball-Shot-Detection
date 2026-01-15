@@ -1,14 +1,24 @@
 __pycache__/
 *.pyc
+.venv/
 venv/
 
-data/input/
-data/output/
-runs/
 notebooks/
+runs/
 
-data/roboflow/
-# Too large to track
+data/roboflow/*
+!data/roboflow/.gitkeep
+data/input/*
+data/output/*
+!data/input/.gitkeep
+!data/output/.gitkeep
+models/*
+!models/.gitkeep
+
+# YOLO pretrained weights
+yolov8*.pt
+yolo11*.pt
+yolo26*.pt
 
 .ipynb_checkpoints/
 .DS_Store
