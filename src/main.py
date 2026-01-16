@@ -18,10 +18,10 @@ from src.video.draw import (
     draw_result_flash,
 )
 
-VIDEO_PATH = "data/input/sample2.mp4"
-OUT_VIDEO_PATH = "data/output/output_main2.mp4"
+VIDEO_PATH = "data/input/sample.mp4"
+OUT_VIDEO_PATH = "data/output/output_main.mp4"
 
-YOLO_WEIGHTS = "models\\ball_rim_person_shoot_best_t.pt"
+YOLO_WEIGHTS = r"models\\ball_rim_person_shoot_best_t.pt"
 FRAME_STRIDE = 1
 DEBUG = True
 
@@ -32,6 +32,38 @@ CONF_BY_CLASS = {
     "person": 0.30,
     "shoot": 0.15,
 }
+
+
+def draw_yolo_boxes(frame, dets):
+    """Dessine les boxes YOLO + classe + conf (DEBUG)."""
+    colors = {
+        "ball": (0, 255, 0),
+        "rim": (0, 255, 255),
+        "person": (0, 200, 0),
+        "shoot": (255, 0, 0),
+    }
+
+    for d in dets:
+        name = str(d.get("name", "")).lower()
+        conf = float(d.get("conf", 0.0))
+        x1, y1 = int(d["x1"]), int(d["y1"])
+        x2, y2 = int(d["x2"]), int(d["y2"])
+
+        color = colors.get(name, (200, 200, 200))
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+
+        label = f"{name} {conf:.2f}"
+        cv2.putText(
+            frame,
+            label,
+            (x1, max(0, y1 - 6)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            color,
+            1,
+            cv2.LINE_AA,
+        )
+    return frame
 
 
 def filter_by_class_conf(dets, conf_by_class, default_conf=0.25):
@@ -97,8 +129,15 @@ def main():
         below_confirm_frames=3
     )
 
-    made_detector = MadeDetector(window_frames=45, x_tol_px=55, y_margin_px=10)
+    # NOTE: Vous avez demandé à oublier "airball" => made.py devrait renvoyer made/miss/unknown.
+    made_detector = MadeDetector(
+        window_frames=75,
+        x_tol_px=65,
+        rim_line_rel_y=0.28,
+        near_rim_dist_px=155,
+    )
 
+    # On garde la variable airball par compat, mais on ne la considère plus comme un vrai outcome.
     attempts = made = miss = airball = unknown = 0
     ball_trace = []
 
@@ -156,14 +195,14 @@ def main():
                 ball_trace.append((ball_state.cx, ball_state.cy))
 
             # 4) Attempt
-            # IMPORTANT: on ne dépend PAS de made_detector.active() pour autoriser un attempt.
-            # On gère notre propre "fenêtre attempt" (attempt_open).
+            # IMPORTANT:
+            #  - On ne déclenche PAS de nouvel attempt tant que attempt_open=True.
+            #  - attempt_open est fermé uniquement par:
+            #       (a) outcome (made/miss/unknown)
+            #       (b) timeout
+            #       (c) balle clairement loin + sous le rim (anti rebond)
             attempt_evt = None
 
-            # On peut refermer la fenêtre attempt si:
-            # - outcome final reçu (géré plus bas)
-            # - ou timeout
-            # - ou balle clairement loin + sous le rim (anti rebond)
             if attempt_open:
                 # Timeout
                 if (frame_idx - attempt_open_frame) > ATTEMPT_MAX_FRAMES:
@@ -197,10 +236,10 @@ def main():
                     if "shoot_release" in details:
                         shoot_release_count += 1
 
-            # 5) Made/Miss
+            # 5) Made/Miss/Unknown
             made_evt = made_detector.update(frame_idx, dets, ball_state, new_attempt=attempt_evt)
             if made_evt is not None:
-                # Si made/miss/airball est émis, ça ferme la fenêtre attempt
+                # Si un outcome est émis, ça ferme la fenêtre attempt
                 attempt_open = False
 
                 if made_evt.outcome == "made":
@@ -208,12 +247,15 @@ def main():
                 elif made_evt.outcome == "miss":
                     miss += 1
                 elif made_evt.outcome == "airball":
-                    airball += 1
+                    # Vous avez demandé de supprimer l'airball :
+                    # on le rabat sur "miss" pour ne pas polluer les stats.
+                    miss += 1
                 else:
                     unknown += 1
 
             # 6) Debug visuel
             if DEBUG:
+                frame = draw_yolo_boxes(frame, dets)
                 frame = draw_ball_trace(frame, ball_trace, max_length=25)
                 frame = draw_attempt_debug(
                     frame,
@@ -244,3 +286,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
