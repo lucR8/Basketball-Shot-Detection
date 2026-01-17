@@ -134,7 +134,7 @@ class BallTracker:
     def _dynamic_max_jump(self, rim_center: Optional[Tuple[float, float]]) -> float:
         """
         Pick max_jump depending on whether the current tracked ball is near rim.
-        Near rim, allow bigger jumps (fast movement + jitter + occlusion).
+        Near rim, allow bigger jumps (fast motion + jitter + occlusion).
         """
         if rim_center is None or self._last_smoothed is None:
             return self.max_jump_px
