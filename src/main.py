@@ -5,8 +5,8 @@ from pathlib import Path
 from tqdm import tqdm
 from collections import Counter
 
-from src.video.io import VideoReader, make_writer  # <-- votre io.py
-from src.detect.yolo import YoloDetector           # <-- votre yolo.py
+from src.video.io import VideoReader, make_writer
+from src.detect.yolo import YoloDetector
 
 from src.track.ball_tracker import BallTracker
 from src.events.attempt import AttemptDetector
@@ -29,49 +29,35 @@ YOLO_WEIGHTS = r"models\\ball_rim_person_shoot_best_t.pt"
 FRAME_STRIDE = 1
 DEBUG = True
 
-# Seuils par classe (à ajuster)
 CONF_BY_CLASS = {
     "ball": 0.15,
     "rim": 0.25,
-    "person": 0.20,
-    "shoot": 0.10,
+    "person": 0.30,
+    "shoot": 0.15,
 }
 
 
 def draw_yolo_boxes(frame, dets):
-    """Dessine les boxes YOLO + classe + conf (DEBUG)."""
     colors = {
         "ball": (0, 255, 0),
         "rim": (0, 255, 255),
         "person": (0, 200, 0),
         "shoot": (255, 0, 0),
     }
-
     for d in dets:
         name = str(d.get("name", "")).lower()
         conf = float(d.get("conf", 0.0))
         x1, y1 = int(d["x1"]), int(d["y1"])
         x2, y2 = int(d["x2"]), int(d["y2"])
-
         color = colors.get(name, (200, 200, 200))
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-
         label = f"{name} {conf:.2f}"
-        cv2.putText(
-            frame,
-            label,
-            (x1, max(0, y1 - 6)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            color,
-            1,
-            cv2.LINE_AA,
-        )
+        cv2.putText(frame, label, (x1, max(0, y1 - 6)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
     return frame
 
 
 def filter_by_class_conf(dets, conf_by_class, default_conf=0.25):
-    """Filtre les détections avec un seuil par classe."""
     out = []
     for d in dets:
         name = str(d.get("name", "")).lower()
@@ -82,7 +68,6 @@ def filter_by_class_conf(dets, conf_by_class, default_conf=0.25):
 
 
 def best_rim_center(dets):
-    """Retourne (cx, cy) du meilleur rim (confiance max), sinon None."""
     rims = [d for d in dets if str(d.get("name", "")).lower() == "rim"]
     if not rims:
         return None
@@ -100,14 +85,14 @@ def main():
         conf=0.06,
         iou=0.45,
         imgsz=640,
-        device="0",     # "0" si GPU, "cpu" sinon
-        classes=None
+        device="0",
+        classes=None,
     )
 
     fake_ball = FakeBallSuppressor(
         match_radius_px=14,
         still_radius_px=6,
-        min_still_hits=25,     # ~0.8s @ 30fps
+        min_still_hits=25,
         zone_radius_px=28,
         forget_frames=90,
     )
@@ -123,22 +108,40 @@ def main():
 
     tracker = BallTracker(ball_class_name="ball")
 
+    # -----------------------------
+    # AttemptDetector (responsive + robust ball)
+    # -----------------------------
     attempt_detector = AttemptDetector(
         rim_recent_frames=15,
         ball_recent_frames=25,
         shoot_conf_min=0.10,
         shoot_arm_window=25,
+
         ball_person_max_dist_px=95,
         release_sep_increase_px=35,
         release_debounce_frames=2,
+
         enable_ball_size_filter=True,
         ball_area_min_px2=180,
-        ball_area_max_px2=12000,
+        # IMPORTANT: on assouplit (et attempt.py re-scale avec le rim)
+        ball_area_max_px2=40000,
+
         require_ball_below_rim_to_rearm=True,
-        below_margin_px=45,
-        below_confirm_frames=3,
-        # Si vous avez mis shot_window_frames=35 ailleurs, vous pouvez le poser ici explicitement :
-        # shot_window_frames=35,
+        below_margin_px=25,
+        below_confirm_frames=1,
+        shot_window_frames=25,
+
+        # NEW: rim scaling
+        enable_rim_scaling=True,
+        rim_ref_w=110.0,          # si besoin on ajustera après 1 run debug
+        rim_scale_min=0.65,
+        rim_scale_max=1.80,
+
+        # NEW: robust ball point
+        ball_point_memory_frames=6,
+        allow_oversize_ball_when_armed=True,
+        oversize_ball_conf_min=0.20,
+        oversize_ball_dist_boost=1.35,
     )
 
     made_detector = MadeDetector(
@@ -148,7 +151,6 @@ def main():
         near_rim_dist_px=155,
     )
 
-    # Stats (pas d'airball)
     attempts = made = miss = unknown = 0
     ball_trace = []
 
@@ -160,25 +162,17 @@ def main():
     shoot_rise_count = 0
     shoot_release_count = 0
 
-    # ------------------------------------------------------------
-    # Attempt gating (Attempt -> ouvre une fenêtre, Made/Miss la ferme)
-    # ------------------------------------------------------------
     attempt_open = False
     attempt_open_frame = -10**9
 
-    # IMPORTANT: doit être >= made_detector.window_frames
-    ATTEMPT_MAX_FRAMES = 120  # ~4s @ 30fps
+    ATTEMPT_MAX_FRAMES = 120  # >= made_detector.window_frames
     BALL_FAR_FACTOR = 1.8
     BELOW_RIM_MARGIN = 12
 
-    # ------------------------------------------------------------
-    # Instrumentation gate_reason
-    # ------------------------------------------------------------
     gate_hist = Counter()
-    gate_hist_when_free = Counter()   # seulement quand attempt_open==False
+    gate_hist_when_free = Counter()
     blocked_open_frames = 0
     blocked_shot_window_frames = 0
-    last_gate_reason = None
 
     def _count_gate(reas: str | None, *, free: bool):
         if not reas:
@@ -193,18 +187,15 @@ def main():
             if not ok:
                 break
 
-            # Skip si stride > 1
             if FRAME_STRIDE > 1 and (frame_idx % FRAME_STRIDE != 0):
                 frame_idx += 1
                 pbar.update(1)
                 continue
 
-            # 1) YOLO
             raw_dets = detector.predict_frame(frame)
             dets = filter_by_class_conf(raw_dets, CONF_BY_CLASS, default_conf=0.25)
             dets = fake_ball.filter(frame_idx, dets)
 
-            # Stats shoot (présence/conf max)
             shoot_confs = [
                 float(d.get("conf", 0.0))
                 for d in dets
@@ -214,27 +205,24 @@ def main():
                 shoot_seen += 1
                 shoot_max_conf = max(shoot_max_conf, max(shoot_confs))
 
-            # 2) Rim center
             rim_center = best_rim_center(dets)
 
-            # 3) Tracking balle
             ball_state = tracker.update(frame_idx, dets, rim_center=rim_center)
             if ball_state is not None:
                 ball_trace.append((ball_state.cx, ball_state.cy))
 
-            # 4) Attempt
+            # -----------------------------
+            # Attempt gating
+            # -----------------------------
             attempt_evt = None
 
-            # Si attempt_open bloque, on compte aussi combien de frames on est bloqué
             if attempt_open:
                 blocked_open_frames += 1
 
-                # Timeout => unknown
                 if (frame_idx - attempt_open_frame) > ATTEMPT_MAX_FRAMES:
                     attempt_open = False
                     unknown += 1
 
-                # Anti-rebond géométrique (si on a rim + ball)
                 if attempt_open and (rim_center is not None) and (ball_state is not None):
                     rim_cx, rim_cy = rim_center
                     dx = ball_state.cx - rim_cx
@@ -244,43 +232,31 @@ def main():
                     far_thr = attempt_detector.enter_radius_px * BALL_FAR_FACTOR
                     ball_is_far = dist >= far_thr
                     ball_is_below = ball_state.cy >= (rim_cy + BELOW_RIM_MARGIN)
-
                     if ball_is_far and ball_is_below:
                         attempt_open = False
 
-            # Tant qu'un attempt est ouvert: on n'en déclenche pas de nouveau
             free_to_attempt = not attempt_open
+
             if free_to_attempt:
                 attempt_evt = attempt_detector.update(frame_idx, dets, ball_state)
-
-                # Comptage gate_reason même si pas d'event
-                dbg = attempt_detector.last_debug or {}
-                gr = dbg.get("gate_reason")
-                last_gate_reason = gr
-                _count_gate(gr, free=True)
-
-                if gr == "blocked_shot_window":
-                    blocked_shot_window_frames += 1
-
-                if attempt_evt is not None:
-                    attempts += 1
-                    attempt_open = True
-                    attempt_open_frame = frame_idx
-
-                    # Compteurs via last_debug (fiables)
-                    if dbg.get("shoot_rise"):
-                        shoot_rise_count += 1
-                    shoot_release_count += 1
+                _count_gate(attempt_detector.last_debug.get("gate_reason"), free=True)
             else:
-                # Même quand attempt_open=True, on peut quand même logger le dernier gate_reason connu,
-                # mais ce n'est pas représentatif (AttemptDetector n'est pas appelé).
-                _count_gate(last_gate_reason, free=False)
+                _count_gate(attempt_detector.last_debug.get("gate_reason"), free=False)
 
-            # 5) Made/Miss/Unknown
+            if attempt_evt is not None:
+                attempts += 1
+                attempt_open = True
+                attempt_open_frame = frame_idx
+
+                details = (attempt_evt.details or "").lower()
+                if "shoot_rise" in details:
+                    shoot_rise_count += 1
+                if "shoot_release" in details:
+                    shoot_release_count += 1
+
             made_evt = made_detector.update(frame_idx, dets, ball_state, new_attempt=attempt_evt)
             if made_evt is not None:
                 attempt_open = False
-
                 if made_evt.outcome == "made":
                     made += 1
                 elif made_evt.outcome == "miss":
@@ -288,7 +264,6 @@ def main():
                 else:
                     unknown += 1
 
-            # 6) Debug visuel
             if DEBUG:
                 frame = draw_yolo_boxes(frame, dets)
                 frame = draw_ball_trace(frame, ball_trace, max_length=25)
@@ -320,16 +295,16 @@ def main():
     print("Shoot-release attempts:", shoot_release_count)
 
     print("\n--- Gate reason histogram (all counted frames) ---")
-    for k, v in gate_hist.most_common(20):
-        print(f"{k:32s} {v}")
+    for k, v in gate_hist.most_common():
+        print(f"{k:30s} {v}")
 
     print("\n--- Gate reason histogram (ONLY when free_to_attempt = True) ---")
-    for k, v in gate_hist_when_free.most_common(20):
-        print(f"{k:32s} {v}")
+    for k, v in gate_hist_when_free.most_common():
+        print(f"{k:30s} {v}")
 
     print("\n--- Blocking stats ---")
-    print(f"Frames with attempt_open=True: {blocked_open_frames}")
-    print(f"Frames where gate_reason == blocked_shot_window (while free_to_attempt): {blocked_shot_window_frames}")
+    print("Frames with attempt_open=True:", attempts)
+    print("Frames where gate_reason == blocked_shot_window (while free_to_attempt):", gate_hist_when_free.get("blocked_shot_window", 0))
 
 
 if __name__ == "__main__":

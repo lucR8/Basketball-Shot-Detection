@@ -134,7 +134,7 @@ def draw_attempt_debug(
         frame,
         [f"ATTEMPT #{attempt_count}", (evt.details or "")[:50]],
         x=20,
-        y_top=150,
+        y_top=450,
         font_scale=0.7,
         line_h=26,
         bg_alpha=0.55,
