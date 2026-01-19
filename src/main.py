@@ -27,7 +27,7 @@ OUT_VIDEO_PATH = "data/output/output_main3.mp4"
 
 YOLO_WEIGHTS = r"models\\ball_rim_person_shoot_best_t.pt"
 FRAME_STRIDE = 1
-DEBUG = True
+DEBUG = False
 
 CONF_BY_CLASS = {
     "ball": 0.15,

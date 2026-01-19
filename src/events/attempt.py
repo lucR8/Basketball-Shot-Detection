@@ -59,9 +59,16 @@ class AttemptDetector:
     - arming/release via AttemptFSM
     - rim scaling optionnel
 
-    Patch anti faux positif "balle au sol":
-      - interdit d'armer juste sur shoot_streak/memory si ball_in_shoot == False
-        => évite ARMED + left_shoot=True en boucle => attempt fantôme
+    Patches principaux (anti faux triggers) :
+      1) "balle au sol" :
+         - interdit d'armer juste sur shoot_streak/memory si ball_in_shoot == False
+
+      2) "ball fantôme" :
+         - on compare au tracker UNIQUEMENT quand la balle est basse (dribble/ramassage)
+
+      3) "sep_ok faux positif" quand le shoot bbox est trop large :
+         - sep_ok ne peut déclencher une release que si la balle a *monté* depuis l'arm (delta rel_y)
+         - l'arming basé sur streak (sans shoot_rise) est autorisé seulement si la balle n'est pas trop basse
     """
 
     def __init__(
@@ -105,14 +112,26 @@ class AttemptDetector:
         rim_scale_min: float = 0.6,
         rim_scale_max: float = 1.8,
 
-        # compat main.py (acceptés mais non utilisés ici)
+        # compat main.py (acceptés mais non utilisés par BallPointResolver ici)
         ball_point_memory_frames: int = 6,
         allow_oversize_ball_when_armed: bool = False,
         oversize_ball_conf_min: float = 0.20,
         oversize_ball_dist_boost: float = 1.35,
 
-        # "ball too low" gate simple (reste utile)
+        # "ball too low" gate simple
         ball_too_low_rel_y: float = 0.50,
+
+        # ---------- PATCH "ball fantôme" ----------
+        enable_tracker_ball_match_gate: bool = True,
+        tracker_match_max_dx_px: float = 120.0,
+        tracker_match_max_dy_px: float = 120.0,
+        tracker_gate_min_ball_rel_y: float = 0.62,  # n'activer la comparaison tracker que si balle BASSE
+
+        # ---------- PATCH anti "sep_ok faux trigger" ----------
+        # si on arme sans shoot_rise (streak), on exige une balle plus "haute" (pas en dribble)
+        streak_arm_max_ball_rel_y: float = 0.62,
+        # pour autoriser sep_ok, il faut que la balle ait monté depuis l'arm (rel_y diminue)
+        min_rel_y_rise_for_sep: float = 0.08,
 
         debug: bool = False,
     ):
@@ -152,11 +171,18 @@ class AttemptDetector:
 
         self.ball_too_low_rel_y = float(ball_too_low_rel_y)
 
+        self.enable_tracker_ball_match_gate = bool(enable_tracker_ball_match_gate)
+        self.tracker_match_max_dx_px = float(tracker_match_max_dx_px)
+        self.tracker_match_max_dy_px = float(tracker_match_max_dy_px)
+        self.tracker_gate_min_ball_rel_y = float(tracker_gate_min_ball_rel_y)
+
+        self.streak_arm_max_ball_rel_y = float(streak_arm_max_ball_rel_y)
+        self.min_rel_y_rise_for_sep = float(min_rel_y_rise_for_sep)
+
         self.debug = bool(debug)
 
         self.shoot = ShootSignalTracker(self.shoot_conf_min, memory_frames=int(shoot_memory_frames))
 
-        # IMPORTANT: pas de kwargs "oversize" ici (BallPointResolver ne les supporte pas)
         self.ball = BallPointResolver(
             memory_frames=int(ball_point_memory_frames),
             enable_size_filter=self.enable_ball_size_filter,
@@ -178,6 +204,8 @@ class AttemptDetector:
 
         self._armed_frame: int = -10**9
         self._armed_dist_bp: Optional[float] = None
+        self._armed_ball_rel_y: Optional[float] = None
+        self._armed_via_rise: bool = False  # True si armé sur shoot_rise
 
         self.last_debug: Dict[str, Any] = {}
 
@@ -249,6 +277,34 @@ class AttemptDetector:
         ball_in_shoot = point_in_bbox(bx, by, shoot_bbox, pad=pad_ball)
         d_bp = dist_point_to_bbox(bx, by, person_bbox)
 
+        # ball relative height in person bbox
+        x1, y1, x2, y2 = person_bbox
+        h = max(1.0, (y2 - y1))
+        ball_rel_y = float((by - y1) / h)  # 0=haut, 1=bas
+
+        # PATCH "ball fantôme" (UNIQUEMENT balle basse)
+        if (
+            self.enable_tracker_ball_match_gate
+            and (ball_state is not None)
+            and (src != "tracker")
+            and (ball_rel_y >= self.tracker_gate_min_ball_rel_y)
+        ):
+            dx = abs(float(ball_state.cx) - float(bx))
+            dy = abs(float(ball_state.cy) - float(by))
+            if dx > self.tracker_match_max_dx_px or dy > self.tracker_match_max_dy_px:
+                self.last_debug = {
+                    "frame": frame_idx,
+                    "gate_reason": "ball_not_from_tracker",
+                    "dx": float(dx),
+                    "dy": float(dy),
+                    "max_dx": float(self.tracker_match_max_dx_px),
+                    "max_dy": float(self.tracker_match_max_dy_px),
+                    "ball_rel_y": float(ball_rel_y),
+                    "min_rel_y": float(self.tracker_gate_min_ball_rel_y),
+                    "ball_src": src,
+                }
+                return None
+
         # soft: si balle dans shoot bbox -> on ne la pénalise pas sur close-person
         if (not ball_in_shoot) and (d_bp > dist_thr):
             self.last_debug = {
@@ -260,10 +316,7 @@ class AttemptDetector:
             }
             return None
 
-        # ball too low (simple)
-        x1, y1, x2, y2 = person_bbox
-        h = max(1.0, (y2 - y1))
-        ball_rel_y = float((by - y1) / h)  # 0=haut, 1=bas
+        # ball too low (simple) : seulement avant ARMED + pas dans shoot
         if (self.fsm.state != AttemptFSM.ARMED) and (not ball_in_shoot) and (ball_rel_y >= self.ball_too_low_rel_y):
             self.last_debug = {
                 "frame": frame_idx,
@@ -273,29 +326,24 @@ class AttemptDetector:
             }
             return None
 
-        # -------------------------------------------------
-        # ✅ PATCH IMPORTANT : arm_signal "streak" autorisé seulement si ball_in_shoot
-        # -------------------------------------------------
+        # arm signal (PATCH: streak autorisé seulement si ball_in_shoot, et balle pas trop basse)
         shoot_rise = bool(shoot_info.get("shoot_rise", False))
         shoot_streak = int(shoot_info.get("shoot_streak", 0))
 
-        # ancien: arm_signal = shoot_rise or shoot_streak >= 2
-        # nouveau:
-        # - shoot_rise reste suffisant (signal fort)
-        # - streak>=2 ne suffit que si la balle est effectivement "dans la zone shoot"
-        arm_signal = shoot_rise or (shoot_streak >= 2 and ball_in_shoot)
+        streak_arm_ok = (shoot_streak >= 2 and ball_in_shoot and ball_rel_y <= self.streak_arm_max_ball_rel_y)
+        arm_signal = shoot_rise or streak_arm_ok
 
         if not arm_signal and self.fsm.state == AttemptFSM.IDLE:
-            # debug explicite (utile pour vérifier que le faux positif saute bien)
             self.last_debug = {
                 "frame": frame_idx,
                 "gate_reason": "not_armed_waiting_shoot_rise",
                 "shoot_rise": bool(shoot_rise),
                 "shoot_streak": int(shoot_streak),
                 "ball_in_shoot": bool(ball_in_shoot),
+                "ball_rel_y": float(ball_rel_y),
+                "streak_arm_ok": bool(streak_arm_ok),
             }
             return None
-        # -------------------------------------------------
 
         # arming timeout
         if self.fsm.state == AttemptFSM.ARMED and self._armed_frame > -10**8:
@@ -303,24 +351,36 @@ class AttemptDetector:
                 self.fsm.reset()
                 self._armed_frame = -10**9
                 self._armed_dist_bp = None
+                self._armed_ball_rel_y = None
+                self._armed_via_rise = False
                 self.last_debug = {"frame": frame_idx, "gate_reason": "arming_window_expired"}
                 return None
 
-        # release
+        # release:
+        # left_shoot peut être bruité si bbox shoot bouge; sep_ok aussi peut être bruité.
+        # => on filtre sep_ok avec une condition "ball a monté" depuis l'arm.
         left_shoot = not ball_in_shoot
-        sep_ok = (
+
+        rel_y_rise = 0.0
+        if self._armed_ball_rel_y is not None:
+            rel_y_rise = float(self._armed_ball_rel_y - ball_rel_y)  # positif si la balle monte
+
+        raw_sep_ok = (
             self.fsm.state == AttemptFSM.ARMED
             and self._armed_dist_bp is not None
             and (d_bp - self._armed_dist_bp) >= sep_thr
         )
+        sep_ok = bool(raw_sep_ok and (rel_y_rise >= self.min_rel_y_rise_for_sep))
 
         prev_state = self.fsm.state
         evt = self.fsm.update(frame_idx, arm_signal=arm_signal, release_signal=(left_shoot or sep_ok))
 
-        # baseline distance at arming
+        # baseline distance + rel_y at arming
         if prev_state == AttemptFSM.IDLE and self.fsm.state == AttemptFSM.ARMED:
             self._armed_frame = frame_idx
             self._armed_dist_bp = float(d_bp)
+            self._armed_ball_rel_y = float(ball_rel_y)
+            self._armed_via_rise = bool(shoot_rise)
 
         if evt is not None and evt.name == "ATTEMPT":
             if self.require_ball_below_rim_to_rearm:
@@ -342,8 +402,11 @@ class AttemptDetector:
                 "shoot_streak": int(shoot_streak),
                 "ball_in_shoot": bool(ball_in_shoot),
                 "left": bool(left_shoot),
+                "raw_sep_ok": bool(raw_sep_ok),
                 "sep_ok": bool(sep_ok),
+                "rel_y_rise": float(rel_y_rise),
                 "ball_rel_y": float(ball_rel_y),
+                "armed_ball_rel_y": float(self._armed_ball_rel_y) if self._armed_ball_rel_y is not None else None,
                 "scale": float(s),
             }
 
@@ -354,7 +417,7 @@ class AttemptDetector:
                 rim_cx=rim_cx,
                 rim_cy=rim_cy,
                 distance_px=float(dist_br),
-                details=f"release(ball_src={src}, left={left_shoot}, sep={sep_ok}, scale={s:.2f})",
+                details=f"release(ball_src={src}, left={left_shoot}, sep={sep_ok}, rel_y_rise={rel_y_rise:.2f}, scale={s:.2f})",
             )
 
         self.last_debug = {
@@ -364,5 +427,9 @@ class AttemptDetector:
             "shoot_streak": int(shoot_streak),
             "ball_in_shoot": bool(ball_in_shoot),
             "ball_rel_y": float(ball_rel_y),
+            "armed_ball_rel_y": float(self._armed_ball_rel_y) if self._armed_ball_rel_y is not None else None,
+            "rel_y_rise": float(rel_y_rise),
+            "raw_sep_ok": bool(raw_sep_ok),
+            "sep_ok": bool(sep_ok),
         }
         return None
