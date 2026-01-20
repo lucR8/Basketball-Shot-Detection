@@ -68,6 +68,10 @@ class MadeDetector:
         center_gate_min_px: float = 18.0,
         center_gate_window: int = 6,
         center_gate_min_hits: int = 1,
+        
+        far_rim_dist_px: float = 260.0,
+        far_rim_confirm_frames: int = 6,
+
     ):
         self.window_frames = int(window_frames)
         self.max_window_frames = int(max_window_frames)
@@ -137,6 +141,11 @@ class MadeDetector:
         self._ever_center_evidence: bool = False
         
         self._ever_above_rim_center: bool = False
+        
+        self.far_rim_dist_px = float(far_rim_dist_px)
+        self.far_rim_confirm_frames = int(far_rim_confirm_frames)
+        self._far_rim_count = 0
+
 
         # DEBUG
         self._dbg_center_hits_pts: List[Tuple[float, float]] = []
@@ -211,6 +220,7 @@ class MadeDetector:
         self._dbg_below_hits_pts.clear()
         self._dbg_plane_cross_pt = None
         self._ever_above_rim_center = False
+        self._far_rim_count = 0
 
 
     def _near_rim_now(self, cx: float, cy: float) -> bool:
@@ -255,7 +265,21 @@ class MadeDetector:
         rim_stable_center: Optional[Tuple[float, float]] = None,
     ) -> Optional[MadeEvent]:
 
+        # -------------------------------------------------
+        # FORCE CLOSE previous attempt if new one starts
+        # -------------------------------------------------
+        if new_attempt is not None and self.active:
+            out = MadeEvent(
+                frame_idx=frame_idx,
+                outcome="miss",
+                details="forced_miss_new_attempt",
+            )
+            self._reset()
+            return out
+
+        # -------------------------------------------------
         # 0) Start attempt
+        # -------------------------------------------------
         if new_attempt is not None:
             self._reset()
             self.active = True
@@ -284,7 +308,9 @@ class MadeDetector:
         if not self.active:
             return None
 
+        # -------------------------------------------------
         # 1) Update rim reference
+        # -------------------------------------------------
         if rim_stable_center is not None:
             self._rim_cx, self._rim_cy = map(float, rim_stable_center)
 
@@ -292,17 +318,21 @@ class MadeDetector:
             self._rim_bbox = tuple(map(float, rim_stable_bbox))
             self._y_line, self._y_line_from_bbox = self._compute_y_line()
 
+        # -------------------------------------------------
         # 2) Ball evidence
+        # -------------------------------------------------
         if ball_state is not None:
             cx, cy = float(ball_state.cx), float(ball_state.cy)
             self._pts.append((frame_idx, cx, cy))
             self._last_ball_frame = frame_idx
 
+            # center evidence
             x_thr = self._center_x_gate_thr()
             if x_thr is not None and abs(cx - self._rim_cx) <= x_thr:
-                self._ever_center_evidence = True  # NEW
+                self._ever_center_evidence = True
                 self._dbg_center_hits_pts.append((cx, cy))
 
+            # below rim confirm
             y_below = self._compute_below_rim_line()
             if y_below is not None:
                 if cy >= y_below:
@@ -311,17 +341,45 @@ class MadeDetector:
                 else:
                     self._below_rim_confirm = 0
 
-            if self._near_rim_now(cx, cy):
-                self._last_near_rim_frame = frame_idx
-            
+            # above rim center (direction check)
             if cy <= (self._rim_cy - 2.0):
                 self._ever_above_rim_center = True
 
+            # near rim tracking
+            if self._near_rim_now(cx, cy):
+                self._came_close_to_rim = True
+                self._last_near_rim_frame = frame_idx
 
+            # ---------------------------------------------
+            # EARLY MISS if ball goes FAR after being close
+            # ---------------------------------------------
+            dist = self._dist((cx, cy), (self._rim_cx, self._rim_cy))
+            if (
+                self._came_close_to_rim
+                and not self._passed_rim_plane   # 🔑 NE PAS tuer les rim-in
+                and dist >= self.far_rim_dist_px
+            ):
+                self._far_rim_count += 1
+            else:
+                self._far_rim_count = 0
+            if self._far_rim_count >= self.far_rim_confirm_frames:
+                out = MadeEvent(
+                    frame_idx=frame_idx,
+                    outcome="miss",
+                    details=f"early_miss_far_rim(dist={dist:.1f})",
+                )
+                self._reset()
+                return out
+
+        # -------------------------------------------------
         # 3) Plane crossing
+        # -------------------------------------------------
         if len(self._pts) >= 2 and not self._passed_rim_plane:
             y_line = self._y_line
-            eps = self.y_epsilon_px + (0.0 if self._y_line_from_bbox else self.fallback_extra_y_epsilon_px)
+            eps = self.y_epsilon_px + (
+                0.0 if self._y_line_from_bbox else self.fallback_extra_y_epsilon_px
+            )
+
             for (_, x0, y0), (_, x1, y1) in zip(self._pts[:-1], self._pts[1:]):
                 if (y0 <= y_line - eps) and (y1 >= y_line + eps):
                     t = (y_line - y0) / max(1e-6, (y1 - y0))
@@ -333,14 +391,15 @@ class MadeDetector:
                         self._pass_details = f"pass_plane(x={x_cross:.1f})"
                         break
 
-        # 4) MADE decision (KEY FIX)
+        # -------------------------------------------------
+        # 4) MADE decision (FINAL, STABLE)
+        # -------------------------------------------------
         if (
             self._passed_rim_plane
             and self._ever_center_evidence
-            and self._ever_above_rim_center   
+            and self._ever_above_rim_center
             and self._below_rim_confirm >= self.below_confirm_frames
         ):
-
             out = MadeEvent(
                 frame_idx=frame_idx,
                 outcome="made",
@@ -349,7 +408,9 @@ class MadeDetector:
             self._reset()
             return out
 
+        # -------------------------------------------------
         # 5) Timeout → MISS
+        # -------------------------------------------------
         elapsed = frame_idx - self._start_frame
         if elapsed >= self.window_frames:
             if elapsed < self.max_window_frames:
