@@ -337,7 +337,20 @@ def main():
     finally:
         pbar.close()
         cap.release()
-        writer.release()
+        writer.release()     
+
+    # -------------------------------------------------
+    # FORCE UNKNOWN if video ends with unresolved attempts
+    # -------------------------------------------------
+    resolved = made + miss + unknown
+    missing = attempts - resolved
+
+    if missing > 0:
+        for _ in range(missing):
+            unknown += 1
+            forced_unknown_details.append(
+                f"forced_unknown@end_of_video(frame={frame_idx})"
+            )
 
     print("Saved:", OUT_VIDEO_PATH)
     print(f"Attempts={attempts} Made={made} Miss={miss} Unknown={unknown}")

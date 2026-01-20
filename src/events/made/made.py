@@ -146,6 +146,10 @@ class MadeDetector:
         self.far_rim_confirm_frames = int(far_rim_confirm_frames)
         self._far_rim_count = 0
 
+        self._ever_descended: bool = False
+        self._last_cy: Optional[float] = None
+
+        self._has_descended: bool = False
 
         # DEBUG
         self._dbg_center_hits_pts: List[Tuple[float, float]] = []
@@ -221,7 +225,9 @@ class MadeDetector:
         self._dbg_plane_cross_pt = None
         self._ever_above_rim_center = False
         self._far_rim_count = 0
-
+        self._ever_descended = False
+        self._last_cy = None
+        self._has_descended = False
 
     def _near_rim_now(self, cx: float, cy: float) -> bool:
         d = self._dist((cx, cy), (self._rim_cx, self._rim_cy))
@@ -326,6 +332,24 @@ class MadeDetector:
             self._pts.append((frame_idx, cx, cy))
             self._last_ball_frame = frame_idx
 
+            # -------------------------------------------------
+            # Detect ball descent (APEX PASSED)
+            # -------------------------------------------------
+            if self._last_cy is not None:
+                # Image coordinates: y increases downward
+                if cy > self._last_cy + 1.5:  # tolerance (px)
+                    self._has_descended = True
+
+            self._last_cy = cy
+
+
+            # detect descent (after apex)
+            if self._last_cy is not None:
+                if cy > self._last_cy + 1.0:  # pixel tolerance
+                    self._ever_descended = True
+            self._last_cy = cy
+
+
             # center evidence
             x_thr = self._center_x_gate_thr()
             if x_thr is not None and abs(cx - self._rim_cx) <= x_thr:
@@ -362,7 +386,11 @@ class MadeDetector:
                 self._far_rim_count += 1
             else:
                 self._far_rim_count = 0
-            if self._far_rim_count >= self.far_rim_confirm_frames:
+            if self._has_descended and self._far_rim_count >= self.far_rim_confirm_frames:
+                if not self._ever_descended:
+                    # ball still in flight → cannot decide
+                    return None
+
                 out = MadeEvent(
                     frame_idx=frame_idx,
                     outcome="miss",
@@ -370,6 +398,7 @@ class MadeDetector:
                 )
                 self._reset()
                 return out
+
 
         # -------------------------------------------------
         # 3) Plane crossing
@@ -395,7 +424,8 @@ class MadeDetector:
         # 4) MADE decision (FINAL, STABLE)
         # -------------------------------------------------
         if (
-            self._passed_rim_plane
+            self._has_descended
+            and self._passed_rim_plane
             and self._ever_center_evidence
             and self._ever_above_rim_center
             and self._below_rim_confirm >= self.below_confirm_frames
@@ -412,7 +442,9 @@ class MadeDetector:
         # 5) Timeout → MISS
         # -------------------------------------------------
         elapsed = frame_idx - self._start_frame
-        if elapsed >= self.window_frames:
+        if elapsed >= self.window_frames and self._has_descended:
+            if not self._ever_descended:
+                return None     
             if elapsed < self.max_window_frames:
                 if frame_idx - self._last_near_rim_frame <= self.near_rim_grace_frames:
                     return None
