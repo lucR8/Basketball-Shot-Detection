@@ -7,7 +7,12 @@ import math
 
 @dataclass
 class RimStable:
-    """Stabilized rim state (does NOT modify raw detections)."""
+    """
+    Stabilized rim reference.
+
+    This is intentionally separate from raw detections:
+    downstream modules consume RimStable, while YOLO boxes remain unchanged.
+    """
     cx: float
     cy: float
     bbox: Tuple[float, float, float, float]  # (x1, y1, x2, y2)
@@ -17,10 +22,16 @@ class RimStable:
 
 class RimStabilizer:
     """
-    Rim stabilizer for mostly static-camera videos.
+    Temporal smoothing of rim detections for mostly static-camera videos.
 
-    It NEVER edits `dets`. It only returns a stabilized rim center/bbox, to feed
-    downstream modules (BallTracker, MadeDetector, etc.).
+    Why this exists:
+    - Rim detections jitter frame-to-frame (small box, partial occlusions).
+    - Outcome reasoning needs a stable geometric reference (rim center + rim plane).
+
+    Design choices:
+    - This module never edits `dets` (separation of perception vs. reasoning).
+    - It outputs a stable reference once enough consistent detections are seen (warmup).
+    - It can keep (“hold”) the last stable reference briefly when detections disappear.
     """
 
     def __init__(
@@ -29,8 +40,23 @@ class RimStabilizer:
         conf_min: float = 0.35,
         hold_frames: int = 60,
         warmup_min_hits: int = 8,
-        max_step_px: float = 0.0,  # IMPORTANT: default OFF
+        max_step_px: float = 0.0,
     ):
+        """
+        alpha:
+          EMA smoothing factor (higher = more reactive).
+
+        warmup_min_hits:
+          Number of confident rim observations required before declaring the rim “stable”.
+          This avoids locking on a single spurious detection.
+
+        hold_frames:
+          If the rim disappears temporarily, keep the last stable reference for this many frames.
+
+        max_step_px:
+          Optional clamp on per-frame motion of the stabilized rim.
+          Default is 0 (disabled) because the rim should not move significantly; EMA is enough.
+        """
         self.alpha = float(alpha)
         self.conf_min = float(conf_min)
         self.hold_frames = int(hold_frames)
@@ -49,6 +75,7 @@ class RimStabilizer:
 
     @staticmethod
     def _clip_step(prev: float, new: float, max_step: float) -> float:
+        """Optional per-coordinate clamp (disabled when max_step <= 0)."""
         if max_step <= 0:
             return new
         d = new - prev
@@ -67,6 +94,12 @@ class RimStabilizer:
         self._hits = 0
 
     def update(self, frame_idx: int, dets: List[Dict[str, Any]]) -> Optional[RimStable]:
+        """
+        Update and (optionally) return a stabilized rim reference.
+
+        Returns None during warmup (until enough hits are collected),
+        then returns a RimStable and continues returning it during short dropouts.
+        """
         rim = self._pick_best_rim(dets)
 
         if rim is not None:
@@ -95,7 +128,6 @@ class RimStabilizer:
                         sx1, sy1, sx2, sy2 = self._stable.bbox
                         scx, scy = self._stable.cx, self._stable.cy
 
-                        # Optional clamp (OFF by default)
                         cx_c = self._clip_step(scx, cx, self.max_step_px)
                         cy_c = self._clip_step(scy, cy, self.max_step_px)
                         x1_c = self._clip_step(sx1, x1, self.max_step_px)

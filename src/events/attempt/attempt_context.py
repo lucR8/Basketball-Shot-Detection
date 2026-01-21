@@ -9,6 +9,7 @@ BBox = Tuple[float, float, float, float]
 
 
 def pick_best(detections: List[Dict[str, Any]], cls_name: str) -> Optional[Dict[str, Any]]:
+    """Select the highest-confidence detection for a class."""
     cls = cls_name.lower()
     cand = [d for d in detections if str(d.get("name", "")).lower() == cls]
     if not cand:
@@ -28,30 +29,45 @@ def det_center(det: Dict[str, Any]) -> Tuple[float, float]:
 
 
 def ball_rel_y_in_person(bx: float, by: float, person_bbox: BBox) -> float:
+    """
+    Ball vertical position relative to the person's bbox.
+    Convention: 0.0 = top of person bbox, 1.0 = bottom.
+    """
     x1, y1, x2, y2 = person_bbox
     h = max(1.0, (y2 - y1))
-    return float((by - y1) / h)  # 0=haut, 1=bas
+    return float((by - y1) / h)
 
 
 @dataclass(frozen=True)
 class AttemptContext:
+    """
+    Normalized per-frame context used by gates and release logic.
+
+    Why this exists:
+    - AttemptDetector combines many signals (shoot, person, ball, scaling).
+    - Building a single immutable context object makes the decision path explicit,
+      testable, and easier to debug.
+
+    The context is "engineering geometry":
+    it contains only computed quantities, not decisions.
+    """
     frame_idx: int
 
-    # inputs
+    # Inputs
     shoot_info: Dict[str, Any]
     shoot_bbox: BBox
     person_bbox: BBox
     ball_xy: Tuple[float, float]
     ball_src: str
 
-    # scaling
+    # Scaling (rim-dependent)
     scale: float
     pad_person: float
     pad_ball: float
     dist_thr: float
     sep_thr: float
 
-    # derived
+    # Derived geometry / features
     cover: float
     person_in_shoot: bool
     ball_in_shoot: bool
@@ -75,6 +91,14 @@ def build_context(
     release_sep_increase_px: float,
     armed_ball_rel_y: Optional[float],
 ) -> AttemptContext:
+    """
+    Build an AttemptContext from raw inputs.
+
+    Notes on scaling:
+    - Some thresholds are expressed in pixels but should adapt to video scale
+      (rim size changes with camera distance).
+    - `scale` is computed from the current rim bbox width vs a reference width.
+    """
     bx = float(ball_point[0])
     by = float(ball_point[1])
     src = str(ball_point[2])
@@ -84,14 +108,20 @@ def build_context(
     dist_thr = float(ball_person_max_dist_px) * float(scale)
     sep_thr = float(release_sep_increase_px) * float(scale)
 
+    # How much the "shoot" bbox overlaps the person bbox (proxy: shoot belongs to this person).
     cover = float(person_cover_ratio(person_bbox, shoot_bbox, pad=pad_person))
     person_in_shoot = bool(cover >= float(person_in_shoot_min_cover))
 
+    # Is the ball point within the shoot bbox (with tolerance).
     ball_in_shoot = bool(point_in_bbox(bx, by, shoot_bbox, pad=pad_ball))
+
+    # Distance from ball point to the person bbox (0 if inside).
     d_bp = float(dist_point_to_bbox(bx, by, person_bbox))
 
+    # Ball vertical position within the person bbox.
     rel_y = float(ball_rel_y_in_person(bx, by, person_bbox))
 
+    # Release uses a "rise" metric relative to the arming frame.
     rel_y_rise = 0.0
     if armed_ball_rel_y is not None:
         rel_y_rise = float(armed_ball_rel_y - rel_y)

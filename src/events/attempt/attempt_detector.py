@@ -29,6 +29,13 @@ from src.events.attempt.attempt_debug import make_last_debug, attach_fsm_counter
 
 @dataclass
 class AttemptEvent:
+    """
+    Shot attempt event emitted by AttemptDetector.
+
+    This is the bridge between:
+    - Attempt detection (temporal logic + gates), and
+    - Outcome classification (MadeDetector), which needs rim + ball geometry.
+    """
     frame_idx: int
     ball_cx: float
     ball_cy: float
@@ -40,100 +47,100 @@ class AttemptEvent:
 
 class AttemptDetector:
     """
-    Attempt detector orchestrator (FSM + gates + signals).
-    All "heavy" logic is split across:
-      - attempt_context.py
-      - attempt_gates.py
-      - attempt_release.py
-      - attempt_debug.py
+    Orchestrator for shot attempt detection.
 
-    Patches intégrés :
-      - shoot bbox memory en ARMED
-      - person bbox memory en ARMED (anti trous 1-2 frames)
-      - ARMED peut déclencher un release via sep_ok même si shoot bbox manque (anti FN)
-      - anti faux positifs conservés (rel_y_rise gate, tracker gate seulement quand balle basse, etc.)
+    Responsibility (engineering separation):
+    - Consume frame-level detections (YOLO) and ball_state (tracker).
+    - Apply *gates* (spatial plausibility constraints) to reduce false positives.
+    - Run a small FSM to convert continuous signals into a discrete ATTEMPT event.
 
-    Anti-faux positifs (NEW) :
-      - ne jamais stocker _armed_dist_bp si invalide (sentinelle 1e9, inf, None)
-      - (optionnel mais recommandé) en LOCKED: pas de release (clock FSM only)
+    Internal structure:
+    - ShootSignalTracker: turn YOLO "shoot" into temporal signals (+ short bbox memory).
+    - BallPointResolver: choose one ball point per frame (tracker / yolo / memory).
+    - build_context(): compute geometric features at this frame (ball-in-shoot, overlap, distances, scaling).
+    - attempt_gates.py: pure boolean gating functions.
+    - attempt_release.py: compute release cues (left_shoot / sep_ok / optional motion).
+    - AttemptFSM: debounced event trigger + lock window.
 
-    Debug patch :
-      - “release_started_*” : snapshot du moment où release_signal devient True en ARMED
-        (raison + métriques), pour éviter l’illusion “tout est à False au moment du trigger”.
+    Design assumptions:
+    - One relevant shooter and one relevant ball at a time (single-attempt reasoning).
+    - Rim is approximately static over a short window; we keep a recent rim memory.
+    - YOLO detections can drop for a few frames (especially person/shoot at long distance);
+      ARMED state contains controlled fallbacks to remain robust to short holes.
     """
 
     def __init__(
         self,
         enter_radius_px: float = 85.0,
 
-        # time memory
+        # Rim memory horizon (frames)
         rim_recent_frames: int = 15,
-        ball_recent_frames: int = 25,  # kept for compat, not used here
+        ball_recent_frames: int = 25,  # kept for compatibility; not used directly here
         shoot_conf_min: float = 0.18,
 
-        # arming / release
+        # FSM timing
         shoot_arm_window: int = 25,
         release_debounce_frames: int = 2,
         shot_window_frames: int = 20,
 
-        # gates
+        # Spatial gates
         person_in_shoot_min_cover: float = 0.55,
         person_in_shoot_pad_px: float = 20.0,
         ball_in_shoot_pad_px: float = 20.0,
         ball_person_max_dist_px: float = 95.0,
         release_sep_increase_px: float = 35.0,
 
-        # ball filter
+        # Ball validity (anti false positives)
         enable_ball_size_filter: bool = True,
         ball_area_min_px2: float = 180.0,
         ball_area_max_px2: float = 12000.0,
 
-        # rearm lock
+        # Re-arming lock
         require_ball_below_rim_to_rearm: bool = True,
         below_margin_px: float = 45.0,
         below_confirm_frames: int = 3,
 
-        # shoot memory
+        # Shoot bbox memory inside ShootSignalTracker
         shoot_memory_frames: int = 8,
 
-        # local memories
+        # Local memory inside AttemptDetector (ARMED continuity)
         shoot_bbox_recent_frames: int = 6,
         person_bbox_recent_frames: int = 6,
 
-        # rim scaling
+        # Optional rim scaling (normalize pixel thresholds by rim size)
         enable_rim_scaling: bool = False,
         rim_ref_width_px: float | None = None,
-        rim_ref_w: float | None = None,
+        rim_ref_w: float | None = None,  # backwards-compatible alias
         rim_scale_min: float = 0.6,
         rim_scale_max: float = 1.8,
 
-        # compat main.py (accepted but not used inside BallPointResolver here)
+        # Compatibility (BallPointResolver memory)
         ball_point_memory_frames: int = 6,
-        allow_oversize_ball_when_armed: bool = False,
+        allow_oversize_ball_when_armed: bool = False,  # accepted for compatibility; not used here
         oversize_ball_conf_min: float = 0.20,
         oversize_ball_dist_boost: float = 1.35,
 
-        # "ball too low" gate
+        # Pre-armed "ball too low" heuristic
         ball_too_low_rel_y: float = 0.50,
 
-        # ghost ball gate
+        # Ghost-ball gate (compare YOLO vs tracker when ball is low near player)
         enable_tracker_ball_match_gate: bool = True,
         tracker_match_max_dx_px: float = 120.0,
         tracker_match_max_dy_px: float = 120.0,
         tracker_gate_min_ball_rel_y: float = 0.62,
 
-        # arm / release patch
+        # Arming / release robustness
         streak_arm_max_ball_rel_y: float = 0.62,
         min_rel_y_rise_for_sep: float = 0.08,
 
-        # OPTIONAL: motion release (default OFF to avoid new false positives)
+        # Optional motion-based release (OFF by default to avoid new false positives)
         enable_motion_release: bool = False,
         motion_release_vy_thr: float = 2.2,
         motion_release_max_ball_rel_y: float = 0.55,
 
         debug: bool = False,
     ):
-        # compat rim_ref_w
+        # Backward compatibility: rim_ref_w alias
         if rim_ref_width_px is None and rim_ref_w is not None:
             rim_ref_width_px = rim_ref_w
         if rim_ref_width_px is None:
@@ -188,8 +195,8 @@ class AttemptDetector:
 
         self.debug = bool(debug)
 
+        # Perception-side helpers
         self.shoot = ShootSignalTracker(self.shoot_conf_min, memory_frames=int(shoot_memory_frames))
-
         self.ball = BallPointResolver(
             memory_frames=int(ball_point_memory_frames),
             enable_size_filter=self.enable_ball_size_filter,
@@ -197,46 +204,53 @@ class AttemptDetector:
             area_max_px2=self.ball_area_max_px2,
         )
 
+        # Event FSM
         self.fsm = AttemptFSM(
             debounce=int(release_debounce_frames),
             shot_window=int(shot_window_frames),
         )
 
-        # rim memory
+        # Rim memory (used for AttemptEvent geometry and “rim stale” rejection)
         self.last_rim_xy: Optional[Tuple[float, float]] = None
         self.last_rim_bbox: Optional[BBox] = None
         self.last_rim_frame: int = -10**9
 
-        # local shoot bbox memory for ARMED continuity
+        # Local memories to bridge short dropouts in ARMED state
         self._last_shoot_bbox: Optional[BBox] = None
         self._last_shoot_frame: int = -10**9
 
-        # local person bbox memory for ARMED continuity
         self._last_person_bbox: Optional[BBox] = None
         self._last_person_frame: int = -10**9
 
-        # rearm lock
+        # Rearm lock: enforce ball below rim before allowing a new attempt
         self._waiting_below = False
         self._below_streak = 0
 
-        # arming bookkeeping
+        # Arming baseline (stored at IDLE -> ARMED)
         self._armed_frame: int = -10**9
         self._armed_dist_bp: Optional[float] = None
         self._armed_ball_rel_y: Optional[float] = None
         self._armed_via_rise: bool = False
 
-        # release debug bookkeeping
+        # Release debug snapshot: stores the first moment release becomes true
+        # so overlays reflect the actual “start” of release, not only the trigger frame.
         self._release_started_frame: int = -10**9
         self._release_started_reason: Optional[str] = None
         self._release_started_snapshot: Optional[Dict[str, Any]] = None
 
-        # debug
         self.last_debug: Dict[str, Any] = {}
 
     # -----------------
-    # utilities
+    # small utilities (pure helpers)
     # -----------------
     def _scale(self) -> float:
+        """
+        Optional scaling factor derived from rim width.
+
+        Motivation:
+        - Pixel thresholds (distance pads, sep thresholds) should adapt to camera distance.
+        - When enabled, we scale gate thresholds by (current_rim_width / reference_rim_width).
+        """
         if (not self.enable_rim_scaling) or (self.last_rim_bbox is None):
             return 1.0
         x1, _, x2, _ = self.last_rim_bbox
@@ -245,9 +259,23 @@ class AttemptDetector:
         return max(self.rim_scale_min, min(self.rim_scale_max, s))
 
     def _clock_fsm_no_release(self, frame_idx: int):
+        """
+        Advance the FSM timing without allowing release transitions.
+
+        Used to keep LOCKED state time-based and to avoid accidental triggers
+        when required inputs are missing.
+        """
         self.fsm.update(frame_idx, arm_signal=False, release_signal=False)
 
     def _choose_shoot_bbox(self, frame_idx: int, shoot_info: Dict[str, Any]) -> Optional[BBox]:
+        """
+        Choose a shoot bbox for this frame.
+
+        Policy:
+        - Prefer current shoot bbox from ShootSignalTracker.
+        - Otherwise allow a short local memory fallback (ARMED continuity),
+          because shoot detections can disappear briefly at long distance.
+        """
         shoot_bbox = shoot_info.get("shoot_bbox")
         if shoot_bbox is not None:
             self._last_shoot_bbox = shoot_bbox
@@ -260,6 +288,13 @@ class AttemptDetector:
         return None
 
     def _choose_person_bbox(self, frame_idx: int, person_det: Optional[Dict[str, Any]]) -> Optional[BBox]:
+        """
+        Choose a person bbox for this frame with short memory fallback.
+
+        Rationale:
+        - Person detection can be missed intermittently.
+        - When ARMED, a brief hole should not cancel the attempt logic immediately.
+        """
         if person_det is not None:
             pb = det_bbox(person_det)
             self._last_person_bbox = pb
@@ -272,11 +307,19 @@ class AttemptDetector:
         return None
 
     def _reset_release_started(self):
+        """Clear release snapshot bookkeeping (called on re-arming / reset)."""
         self._release_started_frame = -10**9
         self._release_started_reason = None
         self._release_started_snapshot = None
 
     def _maybe_mark_release_started(self, frame_idx: int, *, shoot_info: Dict[str, Any], ctx, release: ReleaseInfo):
+        """
+        Record the first frame where release_signal becomes True in ARMED.
+
+        This is for debugging only:
+        without this snapshot, the overlay may show “all false” at the trigger frame
+        because the decisive signal happened a few frames earlier (debounce effect).
+        """
         if self.fsm.state != AttemptFSM.ARMED:
             return
         if not bool(getattr(release, "release_signal", False)):
@@ -297,7 +340,7 @@ class AttemptDetector:
         self._release_started_frame = int(frame_idx)
         self._release_started_reason = reason
 
-        snap: Dict[str, Any] = {
+        self._release_started_snapshot = {
             "shoot_now": bool(shoot_info.get("shoot_now", False)),
             "shoot_rise": bool(shoot_info.get("shoot_rise", False)),
             "shoot_streak": int(shoot_info.get("shoot_streak", 0)),
@@ -312,33 +355,56 @@ class AttemptDetector:
             "sep_ok": bool(getattr(release, "sep_ok", False)),
             "raw_sep_ok": bool(getattr(release, "raw_sep_ok", False)),
         }
-        self._release_started_snapshot = snap
 
     def _is_valid_dist(self, d: Optional[float]) -> bool:
+        """
+        Distance sanity check used for sep_ok baseline.
+
+        We explicitly reject sentinel values (very large numbers) and non-finite values.
+        This prevents sep_ok from triggering due to invalid bookkeeping.
+        """
         if d is None:
             return False
         try:
             d = float(d)
         except (TypeError, ValueError):
             return False
-        # 1e8+ => sentinelle/invalide (ex: 1e9)
         return math.isfinite(d) and (0.0 <= d < 1e8)
 
     def _safe_dist(self, d: Optional[float]) -> Optional[float]:
+        """Return float(d) if valid, otherwise None."""
         return float(d) if self._is_valid_dist(d) else None
 
     # -----------------
     # main update
     # -----------------
     def update(self, frame_idx: int, detections: List[Dict[str, Any]], ball_state) -> Optional[AttemptEvent]:
-        # rim memory
+        """
+        Main per-frame update.
+
+        Returns:
+        - AttemptEvent exactly once when a shot attempt is triggered, else None.
+
+        The typical flow is:
+        - Maintain rim memory
+        - Apply rearm lock (optional)
+        - Build shoot/person/ball inputs
+        - If LOCKED: clock-only
+        - Else: build context, apply gates, compute arm/release signals, update FSM
+        """
+
+        # -------------------------
+        # 1) Rim memory (used at trigger time to attach rim coordinates)
+        # -------------------------
         rim_det = pick_best(detections, "rim")
         if rim_det is not None:
             self.last_rim_xy = det_center(rim_det)
             self.last_rim_bbox = det_bbox(rim_det)
             self.last_rim_frame = int(frame_idx)
 
-        # below-rim lock
+        # -------------------------
+        # 2) Optional re-arm lock: require ball below rim before accepting a new attempt
+        # -------------------------
         if self._waiting_below and self.last_rim_xy is not None:
             _, rim_cy = self.last_rim_xy
             below_now = False
@@ -359,6 +425,9 @@ class AttemptDetector:
             self._waiting_below = False
             self._below_streak = 0
 
+        # -------------------------
+        # 3) Perception-side signals (shoot, person, ball)
+        # -------------------------
         shoot_info = self.shoot.update(frame_idx, detections)
         shoot_now = bool(shoot_info.get("shoot_now", False))
         shoot_bbox = self._choose_shoot_bbox(frame_idx, shoot_info)
@@ -367,7 +436,9 @@ class AttemptDetector:
         ball_det = pick_best(detections, "ball")
         person_bbox = self._choose_person_bbox(frame_idx, person_det)
 
-        # (RECO) LOCKED: ne pas recalculer release / gates -> clock only
+        # -------------------------
+        # 4) LOCKED: never recompute gates/release; only advance the timer.
+        # -------------------------
         if self.fsm.state == AttemptFSM.LOCKED:
             self._clock_fsm_no_release(frame_idx)
             dbg = make_last_debug(
@@ -379,10 +450,13 @@ class AttemptDetector:
             self.last_debug = attach_fsm_counters(dbg, fsm=self.fsm)
             return None
 
-        # IDLE strict
+        # -------------------------
+        # 5) IDLE prerequisites: we require shoot_now + person bbox + shoot bbox
+        # -------------------------
         if self.fsm.state == AttemptFSM.IDLE:
             self._reset_release_started()
 
+            # If we cannot even define the "shoot configuration", we do not arm.
             if (not shoot_now) or (person_bbox is None) or (shoot_bbox is None):
                 dbg = make_last_debug(
                     frame_idx=frame_idx,
@@ -397,7 +471,14 @@ class AttemptDetector:
                 self.last_debug = attach_fsm_counters(dbg, fsm=self.fsm)
                 return None
 
-        # ARMED: if shoot bbox missing -> allow sep_ok-only continuation (FN fix)
+        # -------------------------
+        # 6) ARMED fallback path: allow release by separation even if shoot bbox disappears
+        #
+        # Motivation:
+        # - At long distance, 'shoot' bbox can be missed intermittently.
+        # - Once ARMED, we prefer to keep continuity and avoid false negatives.
+        # - This fallback only triggers release via sep_ok (with additional safeguards).
+        # -------------------------
         if self.fsm.state == AttemptFSM.ARMED and shoot_bbox is None:
             if person_bbox is None:
                 self._clock_fsm_no_release(frame_idx)
@@ -414,6 +495,7 @@ class AttemptDetector:
                 self.last_debug = attach_fsm_counters(dbg, fsm=self.fsm)
                 return None
 
+            # Resolve ball point (tracker/yolo/memory). Needed for sep_ok computation.
             ball_point_tmp = self.ball.update(frame_idx, ball_state, ball_det, person_bbox)
             if ball_point_tmp is None:
                 self._clock_fsm_no_release(frame_idx)
@@ -435,6 +517,7 @@ class AttemptDetector:
             from src.events.spatial_gates import dist_point_to_bbox
             d_bp = float(dist_point_to_bbox(bx, by, person_bbox))
 
+            # Compute ball_rel_y and rel_y_rise in the same convention as build_context()
             x1, y1, x2, y2 = person_bbox
             h = max(1.0, (y2 - y1))
             ball_rel_y = float((by - y1) / h)
@@ -446,6 +529,7 @@ class AttemptDetector:
             s = self._scale()
             sep_thr = float(self.release_sep_increase_px * s)
 
+            # sep_ok relies on a baseline distance at arming; both must be valid.
             d_bp_safe = self._safe_dist(d_bp)
             armed_bp_safe = self._safe_dist(self._armed_dist_bp)
 
@@ -453,8 +537,10 @@ class AttemptDetector:
             if (d_bp_safe is not None) and (armed_bp_safe is not None):
                 raw_sep_ok = (d_bp_safe - armed_bp_safe) >= sep_thr
 
+            # Additional guard: require a minimal rise to avoid bbox jitter triggers.
             sep_ok = bool(raw_sep_ok and (rel_y_rise >= self.min_rel_y_rise_for_sep))
 
+            # Record the moment release became true (debug transparency).
             if sep_ok and self._release_started_frame <= -10**8:
                 self._release_started_frame = int(frame_idx)
                 self._release_started_reason = "sep_ok"
@@ -480,6 +566,7 @@ class AttemptDetector:
                     self._waiting_below = True
                     self._below_streak = 0
 
+                # At trigger time, we require a recent rim reference to attach geometry.
                 if self.last_rim_xy is None or (frame_idx - self.last_rim_frame) > self.rim_recent_frames:
                     dbg = make_last_debug(
                         frame_idx=frame_idx,
@@ -553,7 +640,7 @@ class AttemptDetector:
             self.last_debug = attach_fsm_counters(dbg, fsm=self.fsm)
             return None
 
-        # From here, we need shoot bbox + person bbox
+        # From this point, the "standard" path requires both person and shoot bbox.
         if person_bbox is None or shoot_bbox is None:
             if self.fsm.state == AttemptFSM.ARMED:
                 self._clock_fsm_no_release(frame_idx)
@@ -570,7 +657,9 @@ class AttemptDetector:
             self.last_debug = attach_fsm_counters(dbg, fsm=self.fsm)
             return None
 
-        # ball point resolution
+        # -------------------------
+        # 7) Resolve ball point (tracker/yolo/memory) and build the per-frame context
+        # -------------------------
         ball_point = self.ball.update(frame_idx, ball_state, ball_det, person_bbox)
         if ball_point is None:
             if self.fsm.state == AttemptFSM.ARMED:
@@ -602,7 +691,9 @@ class AttemptDetector:
             armed_ball_rel_y=self._armed_ball_rel_y,
         )
 
-        # Gate: person in shoot
+        # -------------------------
+        # 8) Gates (false-positive control)
+        # -------------------------
         if not ctx.person_in_shoot:
             if self.fsm.state == AttemptFSM.ARMED:
                 self._clock_fsm_no_release(frame_idx)
@@ -631,7 +722,6 @@ class AttemptDetector:
             self.last_debug = attach_fsm_counters(dbg, fsm=self.fsm)
             return None
 
-        # Gate: ghost ball (only when ball low)
         if self.enable_tracker_ball_match_gate:
             ok, dx, dy = gate_tracker_match_if_low(ctx, ball_state=ball_state, params=self.tracker_params)
             if not ok:
@@ -657,7 +747,6 @@ class AttemptDetector:
                 self.last_debug = attach_fsm_counters(dbg, fsm=self.fsm)
                 return None
 
-        # Gate: ball close to person unless ball_in_shoot
         if not gate_ball_close_person(ctx):
             if self.fsm.state == AttemptFSM.ARMED:
                 self._clock_fsm_no_release(frame_idx)
@@ -671,7 +760,6 @@ class AttemptDetector:
             self.last_debug = attach_fsm_counters(dbg, fsm=self.fsm)
             return None
 
-        # Gate: ball too low (pre-armed only)
         if not gate_ball_too_low_before_armed(ctx, ball_too_low_rel_y=self.ball_too_low_rel_y, fsm_state=self.fsm.state):
             dbg = make_last_debug(
                 frame_idx=frame_idx,
@@ -684,11 +772,16 @@ class AttemptDetector:
             self.last_debug = attach_fsm_counters(dbg, fsm=self.fsm)
             return None
 
-        # ARM SIGNAL (patched)
+        # -------------------------
+        # 9) Arm signal (IDLE -> ARMED)
+        # -------------------------
         shoot_rise = bool(shoot_info.get("shoot_rise", False))
         shoot_streak = int(shoot_info.get("shoot_streak", 0))
         shoot_from_memory = bool(shoot_info.get("shoot_from_memory", False))
 
+        # Two arming modes:
+        # - rise_arm_ok: prefer a true "rising edge" from a fresh detection
+        # - streak_arm_ok: tolerate missing rise by using a short shoot streak (robustness)
         streak_arm_ok = bool(
             (shoot_streak >= 2)
             and ctx.ball_in_shoot
@@ -712,7 +805,7 @@ class AttemptDetector:
             self.last_debug = attach_fsm_counters(dbg, fsm=self.fsm)
             return None
 
-        # arming timeout
+        # If ARMED and we don't get a release within a bounded window, reset to IDLE.
         if self.fsm.state == AttemptFSM.ARMED and self._armed_frame > -10**8:
             if (frame_idx - self._armed_frame) > self.shoot_arm_window:
                 self.fsm.reset()
@@ -732,20 +825,17 @@ class AttemptDetector:
                 self.last_debug = attach_fsm_counters(dbg, fsm=self.fsm)
                 return None
 
-                # RELEASE
+        # -------------------------
+        # 10) Release signal (ARMED -> ATTEMPT)
+        # -------------------------
         armed_clean = bool(self._armed_via_rise or streak_arm_ok)
 
-        # ---------------------------------------------------------
-        # PATCH B (local, propre):
-        # si d_ball_person (ctx) OU baseline armed_dist_bp sont invalides,
-        # on interdit *sep_ok* => release ne peut venir que de left_shoot (ou motion si activé)
-        # ---------------------------------------------------------
+        # sep_ok requires a valid baseline distance at arming AND a valid current distance.
+        # If either is invalid, we forbid sep-based release to avoid spurious triggers.
         armed_bp_valid = self._is_valid_dist(self._armed_dist_bp)
         ctx_bp_valid = self._is_valid_dist(getattr(ctx, "d_ball_person", None))
         allow_sep = bool(armed_bp_valid and ctx_bp_valid)
 
-        # On calcule release normalement (pour garder left_shoot/motion diagnostics),
-        # mais on NE FAIT PAS CONFIANCE à release.release_signal si allow_sep=False.
         release: ReleaseInfo = compute_release(
             ctx,
             fsm_state=self.fsm.state,
@@ -758,44 +848,43 @@ class AttemptDetector:
             ball_state=ball_state,
         )
 
-        # release_signal SAFE:
-        # - si allow_sep=True : on respecte release.release_signal (left_shoot OR sep_ok OR motion...)
-        # - si allow_sep=False: on ignore totalement sep_ok => on ne garde que left_shoot/motion
+        # If sep is not allowed, keep only left_shoot (and optional motion) for FSM.
         if allow_sep:
             release_signal_safe = bool(getattr(release, "release_signal", False))
         else:
-            release_signal_safe = bool(getattr(release, "left_shoot", False)) or bool(getattr(release, "motion_ok", False)) or bool(
-                getattr(release, "motion_release", False)
+            release_signal_safe = (
+                bool(getattr(release, "left_shoot", False))
+                or bool(getattr(release, "motion_ok", False))
+                or bool(getattr(release, "motion_release", False))
             )
 
-        # debug snapshot (reste OK, mais attention: si allow_sep=False on n'autorisera pas sep en FSM)
         self._maybe_mark_release_started(frame_idx, shoot_info=shoot_info, ctx=ctx, release=release)
 
         prev_state = self.fsm.state
         evt = self.fsm.update(frame_idx, arm_signal=arm_signal, release_signal=release_signal_safe)
 
-
-        # baseline distance + rel_y at arming (IDLE -> ARMED)
+        # When entering ARMED, store baselines used by rel_y_rise and sep_ok.
         if prev_state == AttemptFSM.IDLE and self.fsm.state == AttemptFSM.ARMED:
             self._armed_frame = int(frame_idx)
-
-            # >>> PATCH A: ne jamais stocker une distance invalide
-            armed_bp = self._safe_dist(getattr(ctx, "d_ball_person", None))
-            self._armed_dist_bp = armed_bp
-
+            self._armed_dist_bp = self._safe_dist(getattr(ctx, "d_ball_person", None))  # only store if valid
             self._armed_ball_rel_y = float(ctx.ball_rel_y)
             self._armed_via_rise = bool(rise_arm_ok)
             self._reset_release_started()
 
+        # If we fell back to IDLE, clear release snapshot.
         if prev_state != AttemptFSM.IDLE and self.fsm.state == AttemptFSM.IDLE:
             self._reset_release_started()
 
-        # ATTEMPT triggered
+        # -------------------------
+        # 11) ATTEMPT: emit event once, attach rim + ball geometry
+        # -------------------------
         if evt is not None and getattr(evt, "name", None) == "ATTEMPT":
             if self.require_ball_below_rim_to_rearm:
                 self._waiting_below = True
                 self._below_streak = 0
 
+            # Do not emit an attempt if rim reference is too old:
+            # outcome classification needs consistent rim geometry.
             if self.last_rim_xy is None or (frame_idx - self.last_rim_frame) > self.rim_recent_frames:
                 dbg = make_last_debug(
                     frame_idx=frame_idx,
@@ -861,6 +950,7 @@ class AttemptDetector:
                 ),
             )
 
+        # Default path: no event yet, report current status for overlays.
         dbg = make_last_debug(
             frame_idx=frame_idx,
             gate_reason=("armed_waiting_release" if self.fsm.state == AttemptFSM.ARMED else str(self.fsm.state)),

@@ -9,6 +9,15 @@ from src.events.attempt_fsm import AttemptFSM
 
 @dataclass(frozen=True)
 class ReleaseInfo:
+    """
+    Release diagnostics computed in ARMED state.
+
+    Signals:
+    - left_shoot: ball left the shoot bbox (with rel_y_rise validation)
+    - sep_ok: ball-person distance increased significantly vs the baseline at arming
+    - release_by_motion: optional velocity-based cue (kept OFF by default)
+    - release_signal: OR-combination that feeds the FSM debouncer
+    """
     left_shoot_raw: bool
     left_shoot: bool
     raw_sep_ok: bool
@@ -49,11 +58,17 @@ def compute_release(
     motion_release_max_ball_rel_y: Optional[float] = None,
 ) -> ReleaseInfo:
     """
-    Compute release signal.
+    Compute release signals from the current context.
 
-    Compatible with multiple detector call signatures.
+    Design intent:
+    - AttemptDetector keeps arming logic and gating, while this function focuses on
+      "has the ball left the player's control?" cues.
+    - The output is *diagnostic* + a single release_signal for the FSM.
+
+    Notes:
     - sep_thr defaults to ctx.sep_thr if not provided.
-    - accepts ball_state, motion_* aliases.
+    - The function supports older call signatures via motion_* aliases.
+    - Velocity (vy) can be read from ball_state when not explicitly provided.
     """
 
     # Resolve sep_thr
@@ -75,21 +90,26 @@ def compute_release(
         except Exception:
             vy = None
 
-    # left_shoot
+    # left_shoot: ball is no longer in the shoot bbox.
+    # We additionally require a minimal "rise" (ball moved upward relative to person)
+    # to avoid triggering on bbox jitter when the player is still holding the ball.
     left_raw = not bool(ctx.ball_in_shoot)
     left_ok = bool(left_raw and (ctx.rel_y_rise >= float(min_rel_y_rise_for_sep)))
 
-    # sep_ok
+    # sep_ok: ball-person bbox distance increased compared to the baseline at arming.
+    # This is evaluated only in ARMED and only when armed_dist_bp is available.
     raw_sep = False
     if fsm_state == AttemptFSM.ARMED and armed_dist_bp is not None:
         raw_sep = bool((ctx.d_ball_person - float(armed_dist_bp)) >= float(sep_thr))
     sep_ok = bool(raw_sep and (ctx.rel_y_rise >= float(min_rel_y_rise_for_sep)))
 
-    # optional motion release
+    # Optional motion-based release (disabled by default to avoid false positives).
     rel_by_motion = False
     if enable_motion_release and (fsm_state == AttemptFSM.ARMED):
         if armed_clean and (ctx.ball_rel_y <= float(motion_ball_rel_y_max)):
             if (ctx.rel_y_rise >= float(min_rel_y_rise_for_sep)) and (vy is not None) and (vy_thr is not None):
+                # Convention: in image space, upward motion corresponds to decreasing y,
+                # so a negative vy indicates upward ball movement.
                 rel_by_motion = bool(float(vy) <= -float(vy_thr))
 
     release_signal = bool(left_ok or sep_ok or rel_by_motion)

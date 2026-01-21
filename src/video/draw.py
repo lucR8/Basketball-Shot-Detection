@@ -8,9 +8,7 @@ from src.events.made.made import MadeEvent
 
 
 def draw_boxes(frame, detections, show_label: bool = True):
-    """
-    detections: list of dict with keys: x1,y1,x2,y2,conf,cls,name
-    """
+    """Draws bounding boxes for a list of YOLO-like detections (debug utility)."""
     for d in detections:
         x1, y1, x2, y2 = map(int, (d["x1"], d["y1"], d["x2"], d["y2"]))
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
@@ -36,7 +34,13 @@ def draw_ball_trace(
     color: Tuple[int, int, int] = (0, 0, 255),
     radius: int = 3,
 ):
-    """Draw recent trajectory of the ball."""
+    """
+    Draw the recent ball trajectory.
+
+    Rationale:
+    - Ball tracking is a temporal component; a short trace makes motion continuity
+      (and potential tracking errors) visually obvious.
+    """
     if not trace:
         return frame
 
@@ -69,13 +73,14 @@ def _draw_text_panel(
     bg_alpha: float = 0.65,
 ) -> Tuple[int, int, int, int]:
     """
-    Draw a semi-transparent rectangle + multiple lines of text.
-    Returns (x1, y1, x2, y2) panel bbox.
+    Draw a semi-transparent panel with multiple text lines.
+
+    This keeps overlays readable without hiding the video entirely.
+    Returns the panel bounding box (x1, y1, x2, y2).
     """
     if not lines:
         return (x, y_top, x, y_top)
 
-    # Measure width
     max_w = 0
     for t in lines:
         (w, _), _ = cv2.getTextSize(t, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
@@ -89,12 +94,10 @@ def _draw_text_panel(
     x2 = x + panel_w
     y2 = y_top + panel_h
 
-    # alpha background
     overlay = frame.copy()
     cv2.rectangle(overlay, (x1, y1), (x2, y2), bg_color, -1)
     cv2.addWeighted(overlay, bg_alpha, frame, 1.0 - bg_alpha, 0, frame)
 
-    # draw text
     y = y_top + pad + int(line_h * 0.8)
     for t in lines:
         cv2.putText(
@@ -118,7 +121,13 @@ def draw_attempt_debug(
     attempt_count: int,
     radius_px: int = 85,
 ):
-    """Visual debug for a detected shot attempt (only when evt is not None)."""
+    """
+    Visualize an AttemptEvent.
+
+    Shows:
+    - Rim center, ball point at trigger time, and their distance
+    - A compact panel with the attempt id and short details
+    """
     if evt is None:
         return frame
 
@@ -129,9 +138,7 @@ def draw_attempt_debug(
     cv2.circle(frame, ball_pt, 6, (0, 0, 255), -1)
     cv2.line(frame, ball_pt, rim_pt, (255, 255, 0), 2)
 
-    # Put attempt label under the scoreboard area to avoid collisions
     detail = (evt.details or "")
-    # split long text across 2 lines for readability
     detail_lines = []
     if detail:
         detail_lines = [detail[i:i + 60] for i in range(0, min(len(detail), 120), 60)]
@@ -145,12 +152,16 @@ def draw_attempt_debug(
         line_h=26,
         bg_alpha=0.55,
     )
-
     return frame
 
 
 def draw_scoreboard(frame, attempts: int, made: int, miss: int, unknown: int):
-    """Always-on overlay (NO airball)."""
+    """
+    Always-on summary of final statistics.
+
+    This is intentionally independent from the FSM internals:
+    it reports only finalized outcomes (Made/Miss/Unknown).
+    """
     lines = [
         f"Attempts: {attempts}",
         f"Made: {made}",
@@ -173,8 +184,11 @@ def draw_scoreboard(frame, attempts: int, made: int, miss: int, unknown: int):
 
 def draw_result_flash(frame, evt: Optional[MadeEvent]):
     """
-    Big label that appears only when a decision is made.
-    ✅ Patch: also display evt.details (wrapped), so you can debug WHY it was miss/made/unknown.
+    Display the outcome label at decision time (one-frame event).
+
+    Engineering intent:
+    - Provide immediate feedback when the outcome FSM commits.
+    - Optionally display short decision details for debugging/justification.
     """
     if evt is None:
         return frame
@@ -188,17 +202,14 @@ def draw_result_flash(frame, evt: Optional[MadeEvent]):
     else:
         color = (255, 255, 255)
 
-    # Big outcome
     cv2.putText(frame, label, (30, 180), cv2.FONT_HERSHEY_SIMPLEX, 2.0, color, 5, cv2.LINE_AA)
 
-    # Details panel under the big label
     details = (evt.details or "").strip()
     if details:
-        # wrap into lines of ~70 chars
         wrapped = [details[i:i + 70] for i in range(0, min(len(details), 280), 70)]
         _draw_text_panel(
             frame,
-            [f"details:"] + wrapped,
+            ["details:"] + wrapped,
             x=30,
             y_top=200,
             font_scale=0.55,
@@ -213,10 +224,10 @@ def draw_result_flash(frame, evt: Optional[MadeEvent]):
 
 def draw_attempt_gating_debug(frame, attempt_detector, org=(20, 140)):
     """
-    Visual overlay for AttemptDetector gating.
-    - Does NOT overlap scoreboard (default org y=140).
-    - Draws background rectangle BEFORE text.
-    Reads attempt_detector.last_debug (dict).
+    Inspect AttemptDetector gating decisions in real time.
+
+    Reads attempt_detector.last_debug (a dict populated by the FSM).
+    This is meant for analysis and threshold tuning, not for end users.
     """
     if attempt_detector is None:
         return frame
@@ -258,19 +269,16 @@ def draw_attempt_gating_debug(frame, attempt_detector, org=(20, 140)):
 
     gate = str(dbg.get("gate_reason", ""))
 
-    # New debug keys (AttemptDetector patched)
     shoot_now = _safe_bool(dbg.get("shoot_now", False))
     shoot_rise = _safe_bool(dbg.get("shoot_rise", False))
     shoot_streak = _safe_int(dbg.get("shoot_streak", 0))
     shoot_conf = _safe_float(dbg.get("shoot_conf", 0.0), 0.0)
     shoot_from_memory = _safe_bool(dbg.get("shoot_from_memory", False))
 
-    # FSM info
     fsm_state = str(dbg.get("fsm_state", dbg.get("state", "")))
     streak = _safe_int(dbg.get("release_streak", 0))
     deb = _safe_int(dbg.get("release_debounce", 0))
 
-    # Gates
     p_in = _safe_bool(dbg.get("person_in_shoot", False))
     b_in = _safe_bool(dbg.get("ball_in_shoot", False))
     left = _safe_bool(dbg.get("left_shoot", False))
@@ -278,7 +286,6 @@ def draw_attempt_gating_debug(frame, attempt_detector, org=(20, 140)):
     sep_ok = _safe_bool(dbg.get("sep_ok", False))
     raw_sep_ok = _safe_bool(dbg.get("raw_sep_ok", False))
 
-    # Distances / thresholds (handle None safely)
     d_bp = _safe_float(dbg.get("d_ball_person", None), 1e9)
     d_bp_max = _safe_float(dbg.get("ball_person_max_dist_px", dbg.get("dist_thr", None)), 0.0)
     sep_thr = _safe_float(dbg.get("sep_thr", None), 0.0)
@@ -287,11 +294,9 @@ def draw_attempt_gating_debug(frame, attempt_detector, org=(20, 140)):
     armed_ball_rel_y = _safe_float(dbg.get("armed_ball_rel_y", None), -1.0)
     rel_y_rise = _safe_float(dbg.get("rel_y_rise", None), 0.0)
 
-    # Arm path debug
     rise_arm_ok = _safe_bool(dbg.get("rise_arm_ok", False))
     streak_arm_ok = _safe_bool(dbg.get("streak_arm_ok", False))
 
-    # Optional legacy fields (if present)
     p_overlap_r = dbg.get("person_overlap_ratio", None)
     p_overlap_str = "-" if p_overlap_r is None else f"{_safe_float(p_overlap_r):.2f}"
 
@@ -303,7 +308,6 @@ def draw_attempt_gating_debug(frame, attempt_detector, org=(20, 140)):
 
     scale = _safe_float(dbg.get("scale", None), 1.0)
 
-    # Friendly state
     armed = (fsm_state == "ARMED") or _safe_bool(dbg.get("armed", False))
 
     lines = [
@@ -331,7 +335,7 @@ def draw_attempt_gating_debug(frame, attempt_detector, org=(20, 140)):
         bg_alpha=0.60,
     )
 
-    # Optional: draw line ball->person (safe against bad formats)
+    # Optional visualization: ball-to-person segment (helps see association issues).
     ball_xy = dbg.get("ball_xy", None)
     person_bbox = dbg.get("person_bbox", None)
     if (
@@ -348,15 +352,20 @@ def draw_attempt_gating_debug(frame, attempt_detector, org=(20, 140)):
 
     return frame
 
+
 def draw_made_debug(frame, made_detector):
+    """
+    Visualize MadeDetector internal geometry:
+    - rim center
+    - rim plane (y_line)
+    - gates used for decision (center band / below rim line)
+    """
     if not getattr(made_detector, "active", False):
         return frame
 
-    # Rim center
     cx, cy = int(made_detector._rim_cx), int(made_detector._rim_cy)
     cv2.circle(frame, (cx, cy), 4, (255, 255, 255), -1)
 
-    # Center gate (vertical band)
     x_thr = made_detector._center_x_gate_thr()
     if x_thr is not None:
         x1 = int(cx - x_thr)
@@ -364,25 +373,20 @@ def draw_made_debug(frame, made_detector):
         h, w = frame.shape[:2]
         cv2.rectangle(frame, (x1, 0), (x2, h), (0, 255, 0), 1)
 
-    # Rim plane
     y_line = int(made_detector._y_line)
     cv2.line(frame, (0, y_line), (frame.shape[1], y_line), (255, 0, 0), 1)
 
-    # Below rim line
     y_below = made_detector._compute_below_rim_line()
     if y_below is not None:
         cv2.line(frame, (0, int(y_below)), (frame.shape[1], int(y_below)), (0, 255, 255), 1)
 
-    # Plane crossing point
     if made_detector._dbg_plane_cross_pt is not None:
         x, y = made_detector._dbg_plane_cross_pt
         cv2.circle(frame, (int(x), int(y)), 6, (0, 0, 255), -1)
 
-    # Center hit points
     for (x, y) in made_detector._dbg_center_hits_pts[-10:]:
         cv2.circle(frame, (int(x), int(y)), 4, (0, 255, 0), -1)
 
-    # Below gate hit points
     for (x, y) in made_detector._dbg_below_hits_pts[-10:]:
         cv2.circle(frame, (int(x), int(y)), 4, (0, 255, 255), -1)
 

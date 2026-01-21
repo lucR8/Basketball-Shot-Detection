@@ -21,8 +21,14 @@ def make_last_debug(
     extra: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
-    Build a flat dict compatible with your draw overlay.
-    IMPORTANT: keep keys stable, and keep numbers as float/int or None.
+    Build a flat debug dict consumed by overlay code.
+
+    Design goal:
+    - Keep keys stable across refactors so the visualization remains compatible.
+    - Use only JSON-like primitive values (float/int/bool/None/tuples) to make logs readable.
+
+    This function intentionally does not compute decisions: it only reports
+    the intermediate signals used by gates + FSM.
     """
     shoot_info = shoot_info or {}
 
@@ -30,16 +36,16 @@ def make_last_debug(
         "frame": int(frame_idx),
         "gate_reason": str(gate_reason),
 
-        # FSM
+        # FSM state (and derived "armed" boolean used by overlays)
         "fsm_state": str(fsm_state),
         "armed": bool(fsm_state == AttemptFSM.ARMED),
 
-        # filled by attach_fsm_counters
+        # Filled later by attach_fsm_counters()
         "release_streak": 0,
         "release_debounce": 0,
     }
 
-    # Shoot signal
+    # Shoot signal summary
     d.update({
         "shoot_now": bool(shoot_info.get("shoot_now", False)),
         "shoot_rise": bool(shoot_info.get("shoot_rise", False)),
@@ -49,7 +55,7 @@ def make_last_debug(
         "shoot_bbox": shoot_info.get("shoot_bbox", None),
     })
 
-    # Context (spatial)
+    # Spatial context (ball / person / shoot relations)
     if ctx is not None:
         d.update({
             "person_bbox": ctx.person_bbox,
@@ -67,11 +73,11 @@ def make_last_debug(
             "rel_y_rise": float(ctx.rel_y_rise),
             "scale": float(ctx.scale),
 
-            # legacy alias some overlays use
+            # Legacy alias used by some overlays
             "dist_thr": float(ctx.dist_thr),
         })
 
-    # Release info
+    # Release diagnostic signals (left_shoot / sep_ok / motion release)
     if release is not None:
         d.update({
             "left_shoot_raw": bool(release.left_shoot_raw),
@@ -84,7 +90,7 @@ def make_last_debug(
             "vy_thr": release.vy_thr,
         })
 
-    # Arming bookkeeping
+    # Arming bookkeeping (useful to interpret rel_y_rise / sep baseline)
     d.update({
         "armed_ball_rel_y": float(armed_ball_rel_y) if armed_ball_rel_y is not None else None,
         "armed_frame": int(armed_frame) if armed_frame is not None else None,
@@ -99,7 +105,10 @@ def make_last_debug(
 
 def attach_fsm_counters(dbg: Dict[str, Any], *, fsm) -> Dict[str, Any]:
     """
-    Add AttemptFSM counters in a safe way.
+    Attach low-level FSM counters for debugging.
+
+    These attributes are internal implementation details of AttemptFSM,
+    so we access them defensively with getattr().
     """
     dbg["release_streak"] = int(getattr(fsm, "_release_streak", 0))
     dbg["release_debounce"] = int(getattr(fsm, "debounce", 0))

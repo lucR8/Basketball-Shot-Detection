@@ -4,6 +4,7 @@ from typing import Optional, Dict, Any, List, Tuple
 
 
 def _pick_best(detections: List[Dict[str, Any]], cls_name: str) -> Optional[Dict[str, Any]]:
+    """Select the highest-confidence detection for a given class."""
     cls = cls_name.lower()
     cand = [d for d in detections if str(d.get("name", "")).lower() == cls]
     if not cand:
@@ -17,9 +18,20 @@ def _bbox(det: Dict[str, Any]) -> Tuple[float, float, float, float]:
 
 class ShootSignalTracker:
     """
-    Détecte shoot_now/shoot_rise + mémoire courte de la bbox shoot.
-    Invariant important:
-      - si shoot_now=True => shoot_bbox != None
+    Convert YOLO "shoot" detections into a temporally consistent signal.
+
+    Why this exists:
+    - "shoot" (ball release) is an instantaneous / short-lived visual cue.
+    - YOLO may miss it for a few frames (especially at long distances).
+    - The FSM benefits from:
+        - shoot_now: a stable boolean ("shoot is currently active")
+        - shoot_rise: the transition moment (False -> True), used for arming logic
+        - shoot_streak: how many consecutive frames shoot_now has been true
+        - shoot_bbox memory: keep a recent bbox during short dropouts
+
+    Invariant:
+    - If shoot_now is True, shoot_bbox is guaranteed to be not None.
+      (either from the current frame or from memory)
     """
 
     def __init__(self, conf_min: float = 0.18, memory_frames: int = 8):
@@ -34,8 +46,15 @@ class ShootSignalTracker:
         self._shoot_streak = 0
 
     def update(self, frame_idx: int, detections: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Returns a dict of shoot-related signals consumed by AttemptDetector.
+
+        The returned values are intentionally simple:
+        they are "perception-side" signals; gating and attempt decisions happen elsewhere.
+        """
         raw = _pick_best(detections, "shoot")
 
+        # Update memory only with confident detections.
         if raw is not None and float(raw.get("conf", 0.0)) >= self.conf_min:
             self._last_shoot_det = raw
             self._last_shoot_bbox = _bbox(raw)
@@ -46,7 +65,7 @@ class ShootSignalTracker:
         shoot_det = None
         shoot_conf = 0.0
 
-        # Use current strong detection first, else memory
+        # Prefer current strong detection; otherwise fall back to short memory.
         if raw is not None and float(raw.get("conf", 0.0)) >= self.conf_min:
             shoot_det = raw
             shoot_bbox = _bbox(raw)
@@ -69,7 +88,7 @@ class ShootSignalTracker:
             "shoot_rise": bool(shoot_rise),
             "shoot_streak": int(self._shoot_streak),
             "shoot_conf": float(shoot_conf),
-            "shoot_bbox": shoot_bbox,          # <= IMPORTANT
-            "shoot_det": shoot_det,            # may be None if memory bbox only (rare)
+            "shoot_bbox": shoot_bbox,          # guaranteed when shoot_now=True
+            "shoot_det": shoot_det,            # may be None if only memory bbox is available
             "shoot_from_memory": bool(from_memory),
         }

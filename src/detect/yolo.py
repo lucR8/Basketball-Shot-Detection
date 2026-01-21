@@ -1,7 +1,19 @@
 from __future__ import annotations
 from ultralytics import YOLO
 
+
 class YoloDetector:
+    """
+    Thin wrapper around Ultralytics YOLO.
+
+    Responsibility:
+    - Produce per-frame detections (boxes + class + confidence).
+    - No temporal logic, no Made/Miss reasoning.
+
+    Keeping this module simple makes the pipeline easier to evaluate:
+    perception is separated from reasoning (FSM modules).
+    """
+
     def __init__(self, weights: str, conf: float, iou: float, imgsz: int, device: str, classes: list[int] | None = None):
         self.model = YOLO(weights)
         self.conf = conf
@@ -11,6 +23,7 @@ class YoloDetector:
         self.classes = classes if classes else None
 
     def predict_frame(self, frame):
+        """Run inference on a single frame and return detections as plain dicts."""
         results = self.model.predict(
             source=frame,
             conf=self.conf,

@@ -18,6 +18,7 @@ def _dist(a: Tuple[float, float], b: Tuple[float, float]) -> float:
 
 @dataclass
 class _Track:
+    """Short-lived association track used to decide if a detection is static."""
     cx: float
     cy: float
     hits: int = 0
@@ -27,6 +28,7 @@ class _Track:
 
 @dataclass
 class StaticZone:
+    """Learned static region to suppress (center + radius)."""
     cx: float
     cy: float
     r: float
@@ -35,20 +37,27 @@ class StaticZone:
 
 class FakeBallSuppressor:
     """
-    Learns static "ball-like" detections (e.g., a basketball logo on a wall)
-    and filters them out before tracking.
+    Suppress static ball-like false positives.
 
-    It never removes moving balls; only detections that stay in the same place
-    for long enough are added as static zones.
+    Why this exists:
+    - With low YOLO confidence thresholds (for recall), small circular objects
+      may be detected as "ball" (e.g., wall logos).
+    - These static false positives break ball tracking by causing “teleportation”.
+
+    Behavior:
+    - Learns zones where a "ball" detection stays nearly immobile for many frames.
+    - Removes future "ball" detections inside these zones.
+    - Does not remove moving balls: only detections that remain still long enough
+      are promoted to a StaticZone.
     """
 
     def __init__(
         self,
-        match_radius_px: float = 14.0,     # association radius between frames
-        still_radius_px: float = 6.0,      # considered "still" if movement <= this
-        min_still_hits: int = 12,          # frames needed to classify as static
-        zone_radius_px: float = 26.0,      # suppression radius around learned static center
-        forget_frames: int = 90,           # forget temporary tracks if not seen
+        match_radius_px: float = 14.0,
+        still_radius_px: float = 6.0,
+        min_still_hits: int = 12,
+        zone_radius_px: float = 26.0,
+        forget_frames: int = 90,
         max_tracks: int = 50,
     ):
         self.match_radius_px = float(match_radius_px)
@@ -63,18 +72,14 @@ class FakeBallSuppressor:
         self.zones: List[StaticZone] = []
 
     def _in_static_zone(self, cx: float, cy: float) -> bool:
-        for z in self.zones:
-            if _dist((cx, cy), (z.cx, z.cy)) <= z.r:
-                return True
-        return False
+        return any(_dist((cx, cy), (z.cx, z.cy)) <= z.r for z in self.zones)
 
     def filter(self, frame_idx: int, dets: List[dict]) -> List[dict]:
         """
-        Updates internal state using current detections,
-        then returns a filtered list where static fake balls are removed.
-        """
+        Update internal state from current detections, then return filtered detections.
 
-        # 1) update tracks using ball detections not already in static zones
+        This is intended to run before BallTracker.update().
+        """
         balls = [d for d in dets if str(d.get("name", "")).lower() == "ball"]
         ball_centers = []
         for d in balls:
@@ -82,7 +87,7 @@ class FakeBallSuppressor:
             if not self._in_static_zone(cx, cy):
                 ball_centers.append((cx, cy, d))
 
-        # simple greedy matching to existing tracks
+        # Greedy association to existing tracks (sufficient for static-object learning).
         used_track_ids = set()
         for (cx, cy, det) in ball_centers:
             best_id: Optional[int] = None
@@ -97,7 +102,6 @@ class FakeBallSuppressor:
                     best_id = tid
 
             if best_id is None:
-                # create new track
                 if len(self._tracks) < self.max_tracks:
                     tid = self._next_id
                     self._next_id += 1
@@ -110,25 +114,24 @@ class FakeBallSuppressor:
                 if move <= self.still_radius_px:
                     tr.still_hits += 1
 
-                # EMA update (keeps track stable)
+                # EMA update keeps the track center stable against jitter.
                 alpha = 0.25
                 tr.cx = (1 - alpha) * tr.cx + alpha * cx
                 tr.cy = (1 - alpha) * tr.cy + alpha * cy
                 tr.last_frame = frame_idx
                 used_track_ids.add(best_id)
 
-                # Promote to static zone if still long enough
+                # Promote to static zone when still long enough.
                 if tr.still_hits >= self.min_still_hits:
                     self.zones.append(StaticZone(cx=tr.cx, cy=tr.cy, r=self.zone_radius_px, hits=tr.hits))
-                    # remove track so it doesn't keep growing
                     del self._tracks[best_id]
 
-        # 2) garbage collect old tracks
+        # Garbage collect old tracks that disappeared (prevents unbounded growth).
         to_del = [tid for tid, tr in self._tracks.items() if (frame_idx - tr.last_frame) > self.forget_frames]
         for tid in to_del:
             del self._tracks[tid]
 
-        # 3) filter out ball detections inside static zones
+        # Filter out ball detections inside static zones.
         out = []
         for d in dets:
             if str(d.get("name", "")).lower() != "ball":
@@ -136,7 +139,6 @@ class FakeBallSuppressor:
                 continue
             cx, cy = _center(d)
             if self._in_static_zone(cx, cy):
-                # dropped fake/static ball
                 continue
             out.append(d)
 

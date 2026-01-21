@@ -31,5 +31,7 @@ yolov8*.pt
 yolo11*.pt
 yolo26*.pt
 
+tune-yolo26n-objv1-coco 
+
 .ipynb_checkpoints/
 .DS_Store
