@@ -28,7 +28,7 @@ from src.video.draw import (
 VIDEO_PATH = "data/input/sample.mp4"
 OUT_VIDEO_PATH = "data/output/output_main.mp4"
 
-YOLO_WEIGHTS = r"models\\ball_rim_person_shoot_best_t.pt"
+YOLO_WEIGHTS = r"models\\in_use\\ball_rim_person_shoot_best_t.pt"
 FRAME_STRIDE = 1
 DEBUG = True
 

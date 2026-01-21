@@ -13,8 +13,17 @@ data/input/*
 data/output/*
 !data/input/.gitkeep
 !data/output/.gitkeep
+
+# Ignore everything in models
 models/*
+
+# Keep in_use folder
+!models/in_use/
+!models/in_use/**
+
+# Keep gitkeep files
 !models/.gitkeep
+!models/in_use/.gitkeep
 
 
 # YOLO pretrained weights
