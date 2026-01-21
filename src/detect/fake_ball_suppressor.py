@@ -46,7 +46,7 @@ class FakeBallSuppressor:
         self,
         match_radius_px: float = 14.0,     # association radius between frames
         still_radius_px: float = 6.0,      # considered "still" if movement <= this
-        min_still_hits: int = 25,          # frames needed to classify as static
+        min_still_hits: int = 12,          # frames needed to classify as static
         zone_radius_px: float = 26.0,      # suppression radius around learned static center
         forget_frames: int = 90,           # forget temporary tracks if not seen
         max_tracks: int = 50,

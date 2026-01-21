@@ -5,6 +5,7 @@ venv/
 
 notebooks/
 runs/
+scripts/
 
 data/roboflow/*
 !data/roboflow/.gitkeep
@@ -14,6 +15,7 @@ data/output/*
 !data/output/.gitkeep
 models/*
 !models/.gitkeep
+
 
 # YOLO pretrained weights
 yolov8*.pt
