@@ -13,7 +13,7 @@ from src.track.ball_tracker import BallTracker
 from src.track.rim_stabilizer import RimStabilizer, RimStable
 
 from src.events.attempt import AttemptDetector
-from src.events.made.made import MadeDetector
+from src.events.made import MadeDetector
 
 from src.detect.fake_ball_suppressor import FakeBallSuppressor
 from src.video.draw import draw_attempt_gating_debug
@@ -35,10 +35,10 @@ from src.video.draw import (
 # Decisions are taken by temporal reasoning modules.
 # ---------------------------------------------------------------------
 
-VIDEO_PATH = "data/input/sample.mp4"
-OUT_VIDEO_PATH = "data/output/output_main.mp4"
+VIDEO_PATH = "data/input/sample3.mp4"
+OUT_VIDEO_PATH = "data/output/output_main3.mp4"
 
-YOLO_WEIGHTS = r"models\\in_use\\ball_rim_person_shoot_best_t.pt"
+YOLO_WEIGHTS = r"models\\in_use\\ball_rim_person_shoot_best_v5_t10.pt"
 FRAME_STRIDE = 1
 DEBUG = True
 

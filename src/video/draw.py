@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import cv2
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Any, Dict
 
 from src.events.attempt import AttemptEvent
-from src.events.made.made import MadeEvent
+
+# Prefer public exports; fall back to internal location if needed.
+try:
+    from src.events.made import MadeEvent
+except Exception:  # pragma: no cover
+    from src.events.made.made_types import MadeEvent  # type: ignore
+
+from src.events.made.made_context import center_x_gate_thr, compute_below_line
 
 
 def draw_boxes(frame, detections, show_label: bool = True):
-    """Draws bounding boxes for a list of YOLO-like detections (debug utility)."""
+    """Draw bounding boxes for YOLO-like detections (debug utility)."""
     for d in detections:
         x1, y1, x2, y2 = map(int, (d["x1"], d["y1"], d["x2"], d["y2"]))
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
@@ -37,9 +44,9 @@ def draw_ball_trace(
     """
     Draw the recent ball trajectory.
 
-    Rationale:
-    - Ball tracking is a temporal component; a short trace makes motion continuity
-      (and potential tracking errors) visually obvious.
+    Engineering intent:
+    - Make temporal continuity visible (useful to spot tracking jumps / dropouts).
+    - The trace is purely visual and does not affect any decision.
     """
     if not trace:
         return frame
@@ -75,8 +82,7 @@ def _draw_text_panel(
     """
     Draw a semi-transparent panel with multiple text lines.
 
-    This keeps overlays readable without hiding the video entirely.
-    Returns the panel bounding box (x1, y1, x2, y2).
+    Returns the panel bounding box: (x1, y1, x2, y2).
     """
     if not lines:
         return (x, y_top, x, y_top)
@@ -122,11 +128,11 @@ def draw_attempt_debug(
     radius_px: int = 85,
 ):
     """
-    Visualize an AttemptEvent.
+    Visualize an AttemptEvent (one-frame marker at trigger time).
 
     Shows:
-    - Rim center, ball point at trigger time, and their distance
-    - A compact panel with the attempt id and short details
+    - Rim center, ball point at trigger time, and their distance segment
+    - A compact panel with attempt id and short details
     """
     if evt is None:
         return frame
@@ -139,9 +145,9 @@ def draw_attempt_debug(
     cv2.line(frame, ball_pt, rim_pt, (255, 255, 0), 2)
 
     detail = (evt.details or "")
-    detail_lines = []
+    detail_lines: List[str] = []
     if detail:
-        detail_lines = [detail[i:i + 60] for i in range(0, min(len(detail), 120), 60)]
+        detail_lines = [detail[i : i + 60] for i in range(0, min(len(detail), 120), 60)]
 
     _draw_text_panel(
         frame,
@@ -157,10 +163,11 @@ def draw_attempt_debug(
 
 def draw_scoreboard(frame, attempts: int, made: int, miss: int, unknown: int):
     """
-    Always-on summary of final statistics.
+    Always-on summary of finalized statistics.
 
-    This is intentionally independent from the FSM internals:
-    it reports only finalized outcomes (Made/Miss/Unknown).
+    Note:
+    - This overlay is intentionally independent from FSM internals.
+    - It only reports committed outcomes.
     """
     lines = [
         f"Attempts: {attempts}",
@@ -187,8 +194,8 @@ def draw_result_flash(frame, evt: Optional[MadeEvent]):
     Display the outcome label at decision time (one-frame event).
 
     Engineering intent:
-    - Provide immediate feedback when the outcome FSM commits.
-    - Optionally display short decision details for debugging/justification.
+    - Immediate feedback when the outcome module commits.
+    - Optional details help diagnose why a decision was made.
     """
     if evt is None:
         return frame
@@ -206,7 +213,7 @@ def draw_result_flash(frame, evt: Optional[MadeEvent]):
 
     details = (evt.details or "").strip()
     if details:
-        wrapped = [details[i:i + 70] for i in range(0, min(len(details), 280), 70)]
+        wrapped = [details[i : i + 70] for i in range(0, min(len(details), 280), 70)]
         _draw_text_panel(
             frame,
             ["details:"] + wrapped,
@@ -226,8 +233,8 @@ def draw_attempt_gating_debug(frame, attempt_detector, org=(20, 140)):
     """
     Inspect AttemptDetector gating decisions in real time.
 
-    Reads attempt_detector.last_debug (a dict populated by the FSM).
-    This is meant for analysis and threshold tuning, not for end users.
+    Reads attempt_detector.last_debug (dict populated by the attempt FSM).
+    This is intended for debugging/tuning, not for final user display.
     """
     if attempt_detector is None:
         return frame
@@ -355,39 +362,87 @@ def draw_attempt_gating_debug(frame, attempt_detector, org=(20, 140)):
 
 def draw_made_debug(frame, made_detector):
     """
-    Visualize MadeDetector internal geometry:
-    - rim center
-    - rim plane (y_line)
-    - gates used for decision (center band / below rim line)
+    Visualize MadeDetector decision geometry (debug overlay).
+
+    Design rule:
+    - This function must NOT rely on detector private helper methods.
+    - It should consume stable state (rim reference + debug points) only.
+
+    What is drawn:
+    - rim center (white cross/dot)
+    - rim-plane reference y_line (blue)
+    - below-rim confirmation line (yellow)
+    - center-x tolerance band (green)
+    - recorded evidence points (center hits + below hits)
+    - plane crossing point (red)
     """
-    if not getattr(made_detector, "active", False):
+    if made_detector is None or not getattr(made_detector, "active", False):
         return frame
 
-    cx, cy = int(made_detector._rim_cx), int(made_detector._rim_cy)
+    # Rim reference (prefer stable public state; fall back to internal fields).
+    rim_cx = getattr(made_detector, "_rim_cx", None)
+    rim_cy = getattr(made_detector, "_rim_cy", None)
+    rim_bbox = getattr(made_detector, "_rim_bbox", None)
+
+    if rim_cx is None or rim_cy is None:
+        return frame
+
+    cx, cy = int(rim_cx), int(rim_cy)
     cv2.circle(frame, (cx, cy), 4, (255, 255, 255), -1)
 
-    x_thr = made_detector._center_x_gate_thr()
+    # Center evidence band (green): derived from rim bbox width.
+    x_thr = center_x_gate_thr(
+        rim_bbox,
+        getattr(made_detector, "center_gate_radius_rel", 0.35),
+        getattr(made_detector, "center_gate_min_px", 18.0),
+    )
     if x_thr is not None:
         x1 = int(cx - x_thr)
         x2 = int(cx + x_thr)
         h, w = frame.shape[:2]
+        x1 = max(0, min(w - 1, x1))
+        x2 = max(0, min(w - 1, x2))
         cv2.rectangle(frame, (x1, 0), (x2, h), (0, 255, 0), 1)
 
-    y_line = int(made_detector._y_line)
-    cv2.line(frame, (0, y_line), (frame.shape[1], y_line), (255, 0, 0), 1)
+    # Rim plane line (blue): stored on the detector as cached y_line.
+    y_line = getattr(made_detector, "_y_line", None)
+    if y_line is not None:
+        y_line_i = int(y_line)
+        cv2.line(frame, (0, y_line_i), (frame.shape[1], y_line_i), (255, 0, 0), 1)
 
-    y_below = made_detector._compute_below_rim_line()
+    # Below rim line (yellow): compute from bbox using shared context utility.
+    below_rel = getattr(made_detector, "below_rim_rel_y", 0.86)
+    y_below = compute_below_line(rim_bbox, below_rel)
     if y_below is not None:
-        cv2.line(frame, (0, int(y_below)), (frame.shape[1], int(y_below)), (0, 255, 255), 1)
+        yb = int(y_below)
+        cv2.line(frame, (0, yb), (frame.shape[1], yb), (0, 255, 255), 1)
 
-    if made_detector._dbg_plane_cross_pt is not None:
-        x, y = made_detector._dbg_plane_cross_pt
+    # Evidence points:
+    # Prefer new debug container: made_detector.debug.{center_hits_pts, below_hits_pts, plane_cross_pt}
+    dbg = getattr(made_detector, "debug", None)
+
+    plane_cross_pt = None
+    center_pts: List[Tuple[float, float]] = []
+    below_pts: List[Tuple[float, float]] = []
+
+    if dbg is not None:
+        plane_cross_pt = getattr(dbg, "plane_cross_pt", None)
+        center_pts = list(getattr(dbg, "center_hits_pts", []) or [])
+        below_pts = list(getattr(dbg, "below_hits_pts", []) or [])
+    else:
+        # Backward compatibility: older detector versions stored these fields directly.
+        plane_cross_pt = getattr(made_detector, "_dbg_plane_cross_pt", None)
+        center_pts = list(getattr(made_detector, "_dbg_center_hits_pts", []) or [])
+        below_pts = list(getattr(made_detector, "_dbg_below_hits_pts", []) or [])
+
+    if isinstance(plane_cross_pt, (tuple, list)) and len(plane_cross_pt) >= 2:
+        x, y = float(plane_cross_pt[0]), float(plane_cross_pt[1])
         cv2.circle(frame, (int(x), int(y)), 6, (0, 0, 255), -1)
 
-    for (x, y) in made_detector._dbg_center_hits_pts[-10:]:
+    for (x, y) in center_pts[-10:]:
         cv2.circle(frame, (int(x), int(y)), 4, (0, 255, 0), -1)
 
-    for (x, y) in made_detector._dbg_below_hits_pts[-10:]:
+    for (x, y) in below_pts[-10:]:
         cv2.circle(frame, (int(x), int(y)), 4, (0, 255, 255), -1)
 
     return frame

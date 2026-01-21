@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any, Tuple
 import math
@@ -7,10 +8,17 @@ import math
 @dataclass
 class BallState:
     """
-    Tracked ball state used by higher-level reasoning modules.
+    Tracked ball state consumed by higher-level reasoning modules.
 
-    cx, cy are image coordinates (pixels).
-    vx, vy are simple finite-difference estimates (pixels/frame).
+    Coordinates:
+      - cx, cy: image coordinates in pixels
+
+    Motion:
+      - vx, vy: finite-difference velocity estimates in pixels/frame
+
+    Confidence:
+      - conf: detector confidence when observed; 0.0 when the state is a short-horizon
+        prediction during occlusion (i.e., not observed in the current frame).
     """
     frame_idx: int
     cx: float
@@ -22,21 +30,26 @@ class BallState:
 
 class BallTracker:
     """
-    Lightweight tracker that turns per-frame ball detections into a stable trajectory.
+    Lightweight single-object tracker for the basketball.
 
     Why this exists:
-    - The ball is small and often missed; raw detections are noisy.
-    - Event logic (attempt/outcome) is temporal; it needs consistent ball points.
+    - The ball is small, fast, and frequently missed by the detector.
+    - Raw detections are noisy; downstream FSM logic needs a temporally consistent
+      sequence of ball points.
 
     Core assumptions:
-    - There is at most one relevant ball in view at a time.
-    - A true ball detection is usually close to the last known position.
-      (Used to reject false positives when YOLO conf is low.)
+    - At most one relevant ball is present in the view.
+    - A true detection is usually near the last estimated position.
+      This enables gating against false positives when confidence is low.
 
-    Interaction with the pipeline:
-    - Input: detections from YOLO (after filtering / fake-ball suppression)
-    - Output: BallState (or None if fully lost)
-    - Optional rim_center makes the tracker more tolerant to short occlusions near the rim.
+    Inputs / outputs:
+    - Input: YOLO detections (optionally pre-filtered by confidence and fake-ball suppression)
+    - Output: BallState (or None if the track is fully lost)
+
+    Occlusion handling:
+    - When the ball is temporarily missing, we can optionally *predict forward*
+      using a constant-velocity model. This prevents the track from "freezing"
+      and improves reacquisition (distance gating is applied against a moving estimate).
     """
 
     def __init__(
@@ -48,46 +61,66 @@ class BallTracker:
         max_lost_near_rim: int = 25,
         rim_near_px: float = 140.0,
         max_jump_near_rim_px: float = 200.0,
+        *,
+        pred_during_lost: bool = True,
+        jump_per_lost_frame: float = 12.0,
     ):
         """
-        Parameters are expressed in pixels and frames.
+        Parameters (pixels, frames):
 
         max_lost:
-          Number of consecutive missing frames tolerated before resetting the track
+          Max consecutive missing frames tolerated before resetting the track
           (when far from the rim).
 
         max_jump_px:
-          Hard gating against “teleportation” to a false positive (hands/heads/etc.).
+          Base gating threshold against "teleportation" to an unrelated false positive.
 
         Near-rim variants:
-          The ball is frequently occluded near the rim/backboard; we allow a larger
-          missing window and larger jump tolerance in that region.
+          Near the rim/backboard, occlusions are common; we allow a longer missing window
+          and larger admissible jumps to improve reacquisition in that area.
+
+        pred_during_lost:
+          If True, produce predicted BallState during occlusions (conf=0.0), using a
+          constant-velocity model. This keeps the estimate moving and reduces
+          reacquisition failures caused by stale last positions.
+
+        jump_per_lost_frame:
+          Reacquisition slack: the longer the ball has been missing, the larger the
+          admissible jump becomes. This compensates for the increasing uncertainty
+          of the last known position.
         """
         self.ball_class_name = ball_class_name
-        self.max_lost = max_lost
-        self.ema_alpha = ema_alpha
-        self.max_jump_px = max_jump_px
 
-        self.max_lost_near_rim = max_lost_near_rim
-        self.rim_near_px = rim_near_px
-        self.max_jump_near_rim_px = max_jump_near_rim_px
+        self.max_lost = int(max_lost)
+        self.ema_alpha = float(ema_alpha)
+        self.max_jump_px = float(max_jump_px)
+
+        self.max_lost_near_rim = int(max_lost_near_rim)
+        self.rim_near_px = float(rim_near_px)
+        self.max_jump_near_rim_px = float(max_jump_near_rim_px)
+
+        self.pred_during_lost = bool(pred_during_lost)
+        self.jump_per_lost_frame = float(jump_per_lost_frame)
 
         self._lost = 0
         self._history: List[BallState] = []
         self._last_smoothed: Optional[Tuple[float, float]] = None
 
-        # Used by higher-level logic that may need “last known ball time”.
+        # Frame index when the ball was last observed by the detector (not predicted).
         self._last_seen_frame: int = -10**9
 
+    # -----------------------------
+    # Geometry helpers
+    # -----------------------------
     @staticmethod
     def _center(det: Dict[str, Any]) -> Tuple[float, float]:
-        cx = (det["x1"] + det["x2"]) / 2.0
-        cy = (det["y1"] + det["y2"]) / 2.0
+        cx = (float(det["x1"]) + float(det["x2"])) / 2.0
+        cy = (float(det["y1"]) + float(det["y2"])) / 2.0
         return cx, cy
 
     @staticmethod
     def _bbox_area(det: Dict[str, Any]) -> float:
-        return max(0.0, (det["x2"] - det["x1"])) * max(0.0, (det["y2"] - det["y1"]))
+        return max(0.0, float(det["x2"]) - float(det["x1"])) * max(0.0, float(det["y2"]) - float(det["y1"]))
 
     @staticmethod
     def _dist(a: Tuple[float, float], b: Tuple[float, float]) -> float:
@@ -108,15 +141,24 @@ class BallTracker:
 
     @property
     def last_seen_frame(self) -> int:
-        """Frame index when the ball was last detected (not merely carried forward)."""
+        """Frame index when the ball was last detected (not merely predicted)."""
         return self._last_seen_frame
 
+    # -----------------------------
+    # Candidate filtering & gating
+    # -----------------------------
     def _filter_ball_dets(self, detections: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Select only detections of the configured ball class."""
-        return [d for d in detections if str(d.get("name", "")).lower() == self.ball_class_name.lower()]
+        want = self.ball_class_name.lower()
+        return [d for d in detections if str(d.get("name", "")).lower() == want]
 
     def _dynamic_max_lost(self, rim_center: Optional[Tuple[float, float]]) -> int:
-        """Increase tolerance to missing frames when the current track is near the rim."""
+        """
+        Increase tolerance to missing frames when the current track is near the rim.
+
+        Rationale:
+        - Near the rim/backboard, occlusions are common and detector jitter increases.
+        """
         if rim_center is None or self._last_smoothed is None:
             return self.max_lost
         if self._dist(self._last_smoothed, rim_center) <= self.rim_near_px:
@@ -124,12 +166,20 @@ class BallTracker:
         return self.max_lost
 
     def _dynamic_max_jump(self, rim_center: Optional[Tuple[float, float]]) -> float:
-        """Allow larger motion jumps near the rim where detections jitter/occlude."""
-        if rim_center is None or self._last_smoothed is None:
-            return self.max_jump_px
-        if self._dist(self._last_smoothed, rim_center) <= self.rim_near_px:
-            return self.max_jump_near_rim_px
-        return self.max_jump_px
+        """
+        Compute the admissible jump threshold for the current frame.
+
+        Components:
+        - Base jump gate (larger near the rim where jitter/occlusion is common)
+        - Reacquisition slack that grows with the number of consecutive lost frames
+          (the last known position becomes stale as time passes).
+        """
+        base = self.max_jump_px
+        if rim_center is not None and self._last_smoothed is not None:
+            if self._dist(self._last_smoothed, rim_center) <= self.rim_near_px:
+                base = self.max_jump_near_rim_px
+
+        return float(base + self._lost * self.jump_per_lost_frame)
 
     def _select_best(
         self,
@@ -140,33 +190,39 @@ class BallTracker:
         Pick the best ball candidate for this frame.
 
         Design choice (anti-teleportation):
-        - If we have a previous position, we choose the closest candidate.
-        - If even the closest candidate is too far (max_jump), we return None
-          and treat it as occlusion (do not jump to a likely false positive).
+        - If we have a previous estimate, choose the closest candidate.
+        - If even the closest candidate is too far (max_jump), treat as occlusion (None).
+        - Bootstrap: if no estimate yet, pick highest-confidence (tie-break by area).
+
+        Note:
+        - This is intentionally simple (single-object association) to keep reasoning
+          transparent for academic evaluation.
         """
         if not ball_dets:
             return None
 
         if self._last_smoothed is None:
-            # Bootstrap: no history yet -> highest confidence (tie-break by area)
+            # Bootstrap: no history -> highest confidence (tie-break by area)
             return sorted(
                 ball_dets,
-                key=lambda d: (float(d.get("conf", 0.0)), -self._bbox_area(d)),
-                reverse=True
+                key=lambda d: (float(d.get("conf", 0.0)), self._bbox_area(d)),
+                reverse=True,
             )[0]
 
         last_pos = self._last_smoothed
         max_jump_now = self._dynamic_max_jump(rim_center)
 
+        # Score by distance first; then prefer higher confidence; then prefer larger area.
+        # (area is only a weak tie-breaker; it tends to penalize tiny spurious boxes)
         scored: List[Tuple[float, float, float, Dict[str, Any]]] = []
         for d in ball_dets:
             cx, cy = self._center(d)
             dist = self._dist((cx, cy), last_pos)
             conf = float(d.get("conf", 0.0))
             area = self._bbox_area(d)
-            scored.append((dist, -conf, area, d))
+            scored.append((dist, -conf, -area, d))  # area desc
 
-        scored.sort(key=lambda t: (t[0], t[1], t[2]))  # dist asc, conf desc, area asc
+        scored.sort(key=lambda t: (t[0], t[1], t[2]))
         best_dist, _, _, best_det = scored[0]
 
         if best_dist > max_jump_now:
@@ -179,6 +235,9 @@ class BallTracker:
         a = self.ema_alpha
         return (a * new[0] + (1 - a) * prev[0], a * new[1] + (1 - a) * prev[1])
 
+    # -----------------------------
+    # Update
+    # -----------------------------
     def update(
         self,
         frame_idx: int,
@@ -189,24 +248,56 @@ class BallTracker:
         Update the tracker with current frame detections.
 
         Returns:
-        - BallState when a track exists (including during short occlusions, where the
-          last known state is carried forward).
-        - None when the track is fully lost (after max_lost / max_lost_near_rim).
+        - BallState when a track exists (including short occlusions if pred_during_lost=True)
+        - None when the track is fully lost (after max_lost / max_lost_near_rim)
         """
         ball_dets = self._filter_ball_dets(detections)
         best = self._select_best(ball_dets, rim_center=rim_center)
 
+        # -----------------------------
+        # No accepted detection: occlusion / detector miss
+        # -----------------------------
         if best is None:
             self._lost += 1
             max_lost_now = self._dynamic_max_lost(rim_center)
             if self._lost > max_lost_now:
                 self.reset()
                 return None
-            return self.last()
 
+            last = self.last()
+            if last is None or not self.pred_during_lost:
+                return last
+
+            # Predict forward using constant velocity (short-horizon approximation).
+            # We keep the estimate moving to avoid reacquisition failures caused by
+            # a stale last position.
+            pred_x = last.cx + last.vx
+            pred_y = last.cy + last.vy
+
+            if self._last_smoothed is None:
+                self._last_smoothed = (pred_x, pred_y)
+            else:
+                self._last_smoothed = self._ema(self._last_smoothed, (pred_x, pred_y))
+
+            smx, smy = self._last_smoothed
+
+            state = BallState(
+                frame_idx=int(frame_idx),
+                cx=float(smx),
+                cy=float(smy),
+                vx=float(last.vx),
+                vy=float(last.vy),
+                conf=0.0,  # not observed this frame
+            )
+            self._history.append(state)
+            return state
+
+        # -----------------------------
+        # Accepted detection: update filter + velocity
+        # -----------------------------
         self._lost = 0
         cx, cy = self._center(best)
-        self._last_seen_frame = frame_idx
+        self._last_seen_frame = int(frame_idx)
 
         if self._last_smoothed is None:
             sm_cx, sm_cy = cx, cy
@@ -217,16 +308,16 @@ class BallTracker:
         vx, vy = 0.0, 0.0
         prev = self.last()
         if prev is not None:
-            dt = max(1, frame_idx - prev.frame_idx)
+            dt = max(1, int(frame_idx) - int(prev.frame_idx))
             vx = (sm_cx - prev.cx) / dt
             vy = (sm_cy - prev.cy) / dt
 
         state = BallState(
-            frame_idx=frame_idx,
-            cx=sm_cx,
-            cy=sm_cy,
-            vx=vx,
-            vy=vy,
+            frame_idx=int(frame_idx),
+            cx=float(sm_cx),
+            cy=float(sm_cy),
+            vx=float(vx),
+            vy=float(vy),
             conf=float(best.get("conf", 0.0)),
         )
         self._history.append(state)

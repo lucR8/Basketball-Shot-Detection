@@ -32,23 +32,45 @@ def near_rim_now(
     rim_expand_factor: float,
 ) -> bool:
     """
-    Near-rim test used for:
-    - grace windows (avoid deciding too early if the ball is still around the hoop)
-    - early-miss heuristic (ball leaves far after approaching)
+    Decide whether the current ball point is "near the hoop".
 
-    It combines:
-    - distance-to-center threshold
-    - expanded bbox containment as a backup
+    This predicate is used for:
+    - grace windows: avoid deciding too early when the ball is still around the rim
+    - early-miss: detect obvious misses when the ball leaves far after approaching
+
+    When rim bbox exists, we use an *elliptical* gate derived from an expanded bbox.
+    This better matches hoop geometry (wider horizontally) and tolerates localization jitter.
     """
     cx, cy = ball_xy
     rx, ry = rim_xy
+
+    # (1) Distance-to-center fallback (works even if bbox is missing).
     d = math.hypot(cx - rx, cy - ry)
     if d <= float(near_rim_dist_px):
         return True
+
     exp = expanded_rim_bbox(rim_bbox, rim_expand_factor)
-    if exp is not None and point_in_bbox(cx, cy, exp):
+    if exp is None:
+        return False
+
+    x1, y1, x2, y2 = exp
+    ex_cx = 0.5 * (x1 + x2)
+    ex_cy = 0.5 * (y1 + y2)
+    ex_w = max(1.0, x2 - x1)
+    ex_h = max(1.0, y2 - y1)
+
+    # (2) Ellipse around expanded bbox (slightly more permissive than the box itself).
+    slack = 1.15
+    erx = 0.5 * ex_w * slack
+    ery = 0.5 * ex_h * slack
+
+    dx = (cx - ex_cx) / erx
+    dy = (cy - ex_cy) / ery
+    if (dx * dx + dy * dy) <= 1.0:
         return True
-    return False
+
+    # (3) Expanded bbox containment as a simple fallback.
+    return point_in_bbox(cx, cy, exp)
 
 
 def inside_rim_gate(
@@ -62,21 +84,21 @@ def inside_rim_gate(
     fallback_y_px: float,
 ) -> bool:
     """
-    Validate that a rim-plane crossing occurs close to the hoop.
+    Validate that a rim-plane crossing occurs close enough to the rim center.
 
-    - If radii is available: elliptical gate centered at (rim_cx, y_line).
-    - Else: simple abs-distance fallback (used when rim_bbox is missing).
+    If radii (rx, ry) are available (rim bbox exists), use an ellipse test.
+    Otherwise fall back to conservative pixel thresholds.
     """
     if radii is None:
         return (abs(x - rim_cx) <= float(fallback_x_px)) and (abs(y - y_line) <= float(fallback_y_px))
 
     rx, ry = radii
-    dx = (x - rim_cx) / max(1e-6, rx)
-    dy = (y - y_line) / max(1e-6, ry)
+    dx = (x - rim_cx) / float(rx)
+    dy = (y - y_line) / float(ry)
     return (dx * dx + dy * dy) <= 1.0
 
 
-def plane_crossing_point(
+def find_plane_crossing(
     *,
     prev_xy: Tuple[float, float],
     cur_xy: Tuple[float, float],
@@ -95,6 +117,32 @@ def plane_crossing_point(
     x1, y1 = cur_xy
     if not ((y0 <= y_line - eps) and (y1 >= y_line + eps)):
         return None
+
     t = (y_line - y0) / max(1e-6, (y1 - y0))
     x_cross = x0 + t * (x1 - x0)
     return (float(x_cross), float(y_line))
+
+
+def below_gate_hit(
+    *,
+    ball_xy: Tuple[float, float],
+    rim_xy: Tuple[float, float],
+    rim_bbox: Optional[BBox],
+    radius_rel: float,
+    min_px: float,
+) -> bool:
+    """
+    Additional "swish-like" evidence under the rim:
+    ball point close to rim center after it went below the hoop.
+    """
+    cx, cy = ball_xy
+    rx, ry = rim_xy
+
+    if rim_bbox is None:
+        thr = float(min_px)
+        return math.hypot(cx - rx, cy - ry) <= thr
+
+    x1, y1, x2, y2 = rim_bbox
+    rim_w = max(1.0, x2 - x1)
+    thr = max(float(min_px), float(radius_rel) * rim_w)
+    return math.hypot(cx - rx, cy - ry) <= thr

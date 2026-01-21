@@ -15,8 +15,13 @@ class MadeContext:
     This object contains only measurements, not decisions.
     It allows MadeDetector to keep the update() logic readable and auditable.
     """
+
     frame_idx: int
+
+    # Ball observation
     ball_xy: Tuple[float, float]
+
+    # Rim reference
     rim_xy: Tuple[float, float]
     rim_bbox: Optional[BBox]
 
@@ -53,7 +58,7 @@ def compute_y_line(rim_cy: float, rim_bbox: Optional[BBox], rim_line_rel_y: floa
 
 def compute_below_line(rim_bbox: Optional[BBox], below_rim_rel_y: float) -> Optional[float]:
     """
-    Secondary line used to confirm the ball is clearly below the rim.
+    Secondary y-line used to confirm the ball is clearly below the rim.
 
     Only meaningful if rim_bbox exists (we need rim bbox height).
     """
@@ -87,11 +92,9 @@ def rim_gate_radii(
     gate_ry_rel: float,
 ) -> Optional[Tuple[float, float]]:
     """
-    Elliptical gate radii around the rim center used to validate plane crossing.
+    Elliptical gate radii around rim center for validating plane-crossing x.
 
-    The ellipse is a pragmatic approximation:
-    - it encodes "the crossing must occur near the hoop"
-    - it tolerates jitter and perspective distortion
+    If rim_bbox is missing, caller should use a conservative pixel fallback.
     """
     if rim_bbox is None:
         return None
@@ -101,6 +104,45 @@ def rim_gate_radii(
     rx = max(6.0, float(gate_rx_rel) * rim_w)
     ry = max(3.0, float(gate_ry_rel) * rim_h)
     return float(rx), float(ry)
+
+
+# --------------------------------------------------------------------
+# Rim-size scaling helpers (turn pixel thresholds into rim-relative)
+# --------------------------------------------------------------------
+def rim_width(rim_bbox: Optional[BBox]) -> Optional[float]:
+    """Return rim bbox width in pixels, if available."""
+    size = rim_size(rim_bbox)
+    if size is None:
+        return None
+    return float(size[0])
+
+
+def rim_scale_from_bbox(
+    rim_bbox: Optional[BBox],
+    *,
+    rim_ref_w: float,
+    scale_min: float,
+    scale_max: float,
+) -> float:
+    """
+    Convert pixel thresholds into "rim-size-relative" thresholds.
+
+    We estimate a per-video scale factor from the observed rim width:
+        scale = rim_w / rim_ref_w
+
+    - rim_ref_w: expected rim bbox width (px) at which pixel thresholds were tuned.
+    - scale is clamped to stabilize behavior under noisy bbox estimates.
+    """
+    w = rim_width(rim_bbox)
+    if w is None or rim_ref_w <= 1e-6:
+        return 1.0
+    s = float(w) / float(rim_ref_w)
+    return float(min(max(s, float(scale_min)), float(scale_max)))
+
+
+def scale_px(px: float, scale: float) -> float:
+    """Scale a pixel threshold by the current rim scale factor."""
+    return float(px) * float(scale)
 
 
 def build_context(
