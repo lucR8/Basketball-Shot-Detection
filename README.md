@@ -8,7 +8,7 @@ Unlike standard object detection tasks, this project focuses on temporal event i
 
 ## Overview
 
-The pipeline is built to:
+The pipeline is built to :
 
 * detect key objects in each frame (`ball`, `rim`, `person`, `shoot`),
 * track the ball over time,
