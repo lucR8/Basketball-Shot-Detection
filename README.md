@@ -5,7 +5,7 @@ Computer vision project designed to automatically detect basketball shot attempt
 Unlike standard object detection tasks, this project focuses on temporal event inference: a shot is not treated as a single detection, but as a short sequence of visual cues including shooting motion, ball trajectory, and rim interaction.
 
 ---
-
+ 
 ## Overview
 
 The pipeline is built to :
