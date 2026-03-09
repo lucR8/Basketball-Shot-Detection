@@ -44,7 +44,7 @@ def near_rim_now(
     cx, cy = ball_xy
     rx, ry = rim_xy
 
-    # (1) Distance-to-center fallback (works even if bbox is missing).
+    # 1) Distance-to-center fallback (works even if bbox is missing).
     d = math.hypot(cx - rx, cy - ry)
     if d <= float(near_rim_dist_px):
         return True
@@ -59,7 +59,7 @@ def near_rim_now(
     ex_w = max(1.0, x2 - x1)
     ex_h = max(1.0, y2 - y1)
 
-    # (2) Ellipse around expanded bbox (slightly more permissive than the box itself).
+    # 2) Ellipse around expanded bbox (slightly more permissive than the box itself).
     slack = 1.15
     erx = 0.5 * ex_w * slack
     ery = 0.5 * ex_h * slack
@@ -69,7 +69,7 @@ def near_rim_now(
     if (dx * dx + dy * dy) <= 1.0:
         return True
 
-    # (3) Expanded bbox containment as a simple fallback.
+    # 3) Expanded bbox containment as a simple fallback.
     return point_in_bbox(cx, cy, exp)
 
 

@@ -89,6 +89,6 @@ class ShootSignalTracker:
             "shoot_streak": int(self._shoot_streak),
             "shoot_conf": float(shoot_conf),
             "shoot_bbox": shoot_bbox,          # guaranteed when shoot_now=True
-            "shoot_det": shoot_det,            # may be None if only memory bbox is available
+            "shoot_det": shoot_det,            
             "shoot_from_memory": bool(from_memory),
         }

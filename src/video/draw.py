@@ -5,11 +5,10 @@ from typing import List, Tuple, Optional, Any, Dict
 
 from src.events.attempt import AttemptEvent
 
-# Prefer public exports; fall back to internal location if needed.
 try:
     from src.events.made import MadeEvent
-except Exception:  # pragma: no cover
-    from src.events.made.made_types import MadeEvent  # type: ignore
+except Exception:  
+    from src.events.made.made_types import MadeEvent 
 
 from src.events.made.made_context import center_x_gate_thr, compute_below_line
 
@@ -342,7 +341,7 @@ def draw_attempt_gating_debug(frame, attempt_detector, org=(20, 140)):
         bg_alpha=0.60,
     )
 
-    # Optional visualization: ball-to-person segment (helps see association issues).
+    # Optional visualization: ball-to-person segment 
     ball_xy = dbg.get("ball_xy", None)
     person_bbox = dbg.get("person_bbox", None)
     if (
@@ -379,7 +378,7 @@ def draw_made_debug(frame, made_detector):
     if made_detector is None or not getattr(made_detector, "active", False):
         return frame
 
-    # Rim reference (prefer stable public state; fall back to internal fields).
+    # Rim reference (prefer stable public state; fall back to internal fields)
     rim_cx = getattr(made_detector, "_rim_cx", None)
     rim_cy = getattr(made_detector, "_rim_cy", None)
     rim_bbox = getattr(made_detector, "_rim_bbox", None)
@@ -390,7 +389,7 @@ def draw_made_debug(frame, made_detector):
     cx, cy = int(rim_cx), int(rim_cy)
     cv2.circle(frame, (cx, cy), 4, (255, 255, 255), -1)
 
-    # Center evidence band (green): derived from rim bbox width.
+    # Center evidence band (green): derived from rim bbox width
     x_thr = center_x_gate_thr(
         rim_bbox,
         getattr(made_detector, "center_gate_radius_rel", 0.35),
@@ -404,13 +403,13 @@ def draw_made_debug(frame, made_detector):
         x2 = max(0, min(w - 1, x2))
         cv2.rectangle(frame, (x1, 0), (x2, h), (0, 255, 0), 1)
 
-    # Rim plane line (blue): stored on the detector as cached y_line.
+    # Rim plane line (blue): stored on the detector as cached y_line
     y_line = getattr(made_detector, "_y_line", None)
     if y_line is not None:
         y_line_i = int(y_line)
         cv2.line(frame, (0, y_line_i), (frame.shape[1], y_line_i), (255, 0, 0), 1)
 
-    # Below rim line (yellow): compute from bbox using shared context utility.
+    # Below rim line (yellow): compute from bbox using shared context utility
     below_rel = getattr(made_detector, "below_rim_rel_y", 0.86)
     y_below = compute_below_line(rim_bbox, below_rel)
     if y_below is not None:
@@ -418,7 +417,6 @@ def draw_made_debug(frame, made_detector):
         cv2.line(frame, (0, yb), (frame.shape[1], yb), (0, 255, 255), 1)
 
     # Evidence points:
-    # Prefer new debug container: made_detector.debug.{center_hits_pts, below_hits_pts, plane_cross_pt}
     dbg = getattr(made_detector, "debug", None)
 
     plane_cross_pt = None
@@ -430,7 +428,6 @@ def draw_made_debug(frame, made_detector):
         center_pts = list(getattr(dbg, "center_hits_pts", []) or [])
         below_pts = list(getattr(dbg, "below_hits_pts", []) or [])
     else:
-        # Backward compatibility: older detector versions stored these fields directly.
         plane_cross_pt = getattr(made_detector, "_dbg_plane_cross_pt", None)
         center_pts = list(getattr(made_detector, "_dbg_center_hits_pts", []) or [])
         below_pts = list(getattr(made_detector, "_dbg_below_hits_pts", []) or [])

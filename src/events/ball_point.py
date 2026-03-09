@@ -66,12 +66,12 @@ class BallPointResolver:
         bx = by = None
         src = "none"
 
-        # 1) Tracker candidate (preferred baseline for temporal continuity).
+        # 1) Tracker candidate (preferred baseline for temporal continuity)
         if ball_state is not None:
             bx, by = float(ball_state.cx), float(ball_state.cy)
             src = "tracker"
 
-        # 2) YOLO detection overrides tracker if it passes the size validity check.
+        # 2) YOLO detection overrides tracker if it passes the size validity check
         if ball_det is not None:
             ok = True
             if self.enable_size_filter:
@@ -81,7 +81,7 @@ class BallPointResolver:
                 bx, by = _center(ball_det)
                 src = "yolo" if ball_state is not None else "yolo_only"
 
-        # 3) Short memory fallback for brief dropouts.
+        # 3) Short memory fallback for brief dropouts
         if (bx is None or by is None) and self._last_ball_xy is not None:
             if (frame_idx - self._last_ball_frame) <= self.memory_frames:
                 bx, by = self._last_ball_xy

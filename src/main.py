@@ -185,11 +185,11 @@ def main():
     writer = make_writer(OUT_VIDEO_PATH, out_fps, w, h)
 
     # Ball tracking provides temporal association + smoothing.
-    # The FSM modules consume BallState rather than raw ball detections.
+    # The FSM modules consume BallState rather than raw ball detections
     tracker = BallTracker(ball_class_name="ball")
 
     # AttemptDetector: FSM that detects a shot attempt based on temporal patterns
-    # and a valid configuration (shoot + person + ball) with robustness to gaps.
+    # and a valid configuration (shoot + person + ball) with robustness to gaps
     attempt_detector = AttemptDetector(
         rim_recent_frames=15,
         ball_recent_frames=25,
@@ -215,7 +215,7 @@ def main():
         oversize_ball_dist_boost=1.35,
     )
 
-    # MadeDetector: outcome reasoning over a bounded temporal window after attempt.
+    # MadeDetector: outcome reasoning over a bounded temporal window after attempt
     made_detector = MadeDetector(
         window_frames=75,
         max_window_frames=210,
@@ -235,7 +235,7 @@ def main():
     frame_idx = 0
     pbar = tqdm(total=total if total > 0 else None, desc="Processing")
 
-    # Lightweight instrumentation counters (useful to justify gating behavior).
+    # Lightweight instrumentation counters 
     shoot_seen = 0
     shoot_max_conf = 0.0
 
@@ -245,17 +245,17 @@ def main():
     attempts_released_by_sep = 0
     attempts_shoot_from_memory = 0
 
-    # "attempt_open" blocks new attempts while waiting for an outcome.
-    # This prevents double-counting during long trajectories / rebounds.
+    # "attempt_open" blocks new attempts while waiting for an outcome
+    # This prevents double-counting during long trajectories / rebounds
     attempt_open = False
     attempt_open_frame = -10**9
 
-    # Safety: if an attempt stays unresolved too long, force Unknown.
-    # This keeps stats consistent (attempts == made+miss+unknown).
+    # Safety: if an attempt stays unresolved too long, force Unknown
+    # This keeps stats consistent (attempts == made+miss+unknown)
     ATTEMPT_MAX_FRAMES = 230
 
-    # Heuristic to auto-close attempt_open when the ball is clearly far and below rim.
-    # This reduces “lock-up” on rebounds/loose balls.
+    # Heuristic to auto-close attempt_open when the ball is clearly far and below rim
+    # This reduces “lock-up” on rebounds/loose balls
     BALL_FAR_FACTOR = 1.8
     BELOW_RIM_MARGIN = 12
 
@@ -315,7 +315,7 @@ def main():
             if attempt_open:
                 blocked_open_frames += 1
 
-                # Force-close as Unknown if we never get an outcome decision.
+                # Force-close as Unknown if we never get an outcome decision
                 if (frame_idx - attempt_open_frame) > ATTEMPT_MAX_FRAMES:
                     attempt_open = False
                     unknown += 1
@@ -323,8 +323,8 @@ def main():
                         f"forced_unknown@{frame_idx}: attempt_open_timeout({ATTEMPT_MAX_FRAMES})"
                     )
 
-                # Optional auto-close if the ball clearly moved away (far + below rim).
-                # This is a pragmatic guard to handle rebounds / loose-ball sequences.
+                # Optional auto-close if the ball clearly moved away (far + below rim)
+                # This is a pragmatic guard to handle rebounds / loose-ball sequences
                 if attempt_open and (rim_center is not None) and (ball_state is not None):
                     rim_cx, rim_cy = rim_center
                     dx = ball_state.cx - rim_cx
@@ -339,7 +339,7 @@ def main():
 
             free_to_attempt = not attempt_open
 
-            # AttemptDetector produces an event only once per attempt.
+            # AttemptDetector produces an event only once per attempt
             if free_to_attempt:
                 attempt_evt = attempt_detector.update(frame_idx, dets, ball_state)
                 _count_gate(attempt_detector.last_debug.get("gate_reason"), free=True)
@@ -351,7 +351,7 @@ def main():
                 attempt_open = True
                 attempt_open_frame = frame_idx
 
-                # Debug counters to understand which internal arming/release path was used.
+                # Debug counters to understand which internal arming/release path was used
                 dbg = attempt_detector.last_debug or {}
                 if dbg.get("rise_arm_ok"):
                     attempts_armed_via_rise += 1
@@ -380,7 +380,7 @@ def main():
             )
 
             if made_evt is not None:
-                # Once outcome is decided, the system can accept a new attempt.
+                # Once outcome is decided, the system can accept a new attempt
                 attempt_open = False
                 if made_evt.outcome == "made":
                     made += 1
@@ -396,8 +396,8 @@ def main():
             # Debug overlays (pure visualization, no effect on logic)
             # -------------------------------------------------
             if DEBUG:
-                frame = draw_yolo_boxes(frame, dets)  # raw YOLO boxes (unstable by design)
-                frame = _draw_rim_stable_overlay(frame, rim_s)  # stabilized rim reference
+                frame = draw_yolo_boxes(frame, dets)  
+                frame = _draw_rim_stable_overlay(frame, rim_s)  
                 frame = draw_ball_trace(frame, ball_trace, max_length=25)
                 frame = draw_attempt_debug(
                     frame,
@@ -422,7 +422,7 @@ def main():
     # -------------------------------------------------
     # End-of-video consistency:
     # if video ends while an attempt is still unresolved,
-    # force Unknown so that counts remain coherent.
+    # force Unknown so that counts remain coherent
     # -------------------------------------------------
     resolved = made + miss + unknown
     missing = attempts - resolved

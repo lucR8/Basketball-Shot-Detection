@@ -145,7 +145,7 @@ class MadeDetector:
         self._y_line: float = 0.0
         self._y_line_from_bbox: bool = False
 
-        # Current rim scale factor (1.0 when bbox missing or scaling disabled).
+        # Current rim scale factor (1.0 when bbox missing or scaling disabled)
         self._scale: float = 1.0
 
         # Stored ball points: (frame_idx, x, y)
@@ -169,7 +169,7 @@ class MadeDetector:
         # Early-miss bookkeeping
         self._far_rim_count = 0
 
-        # Descent detection (image y increases downward)
+        # Descent detection 
         self._last_cy: Optional[float] = None
         self._has_descended = False
 
@@ -247,13 +247,13 @@ class MadeDetector:
         - MadeEvent when the module commits to an outcome, else None.
         """
 
-        # If a new attempt starts while one is still active, force-close the previous one.
+        # If a new attempt starts while one is still active, force-close the previous one
         if new_attempt is not None and self.active:
             out = MadeEvent(frame_idx=frame_idx, outcome="miss", details="forced_miss_new_attempt")
             self._reset()
             return out
 
-        # Start a new attempt window.
+        # Start a new attempt window
         if new_attempt is not None:
             self._reset()
             self.active = True
@@ -277,7 +277,7 @@ class MadeDetector:
                         float(rim_det["y2"]),
                     )
 
-            # y-line depends on bbox; scale depends on bbox width.
+            # y-line depends on bbox; scale depends on bbox width
             ctx0 = build_context(
                 frame_idx=frame_idx,
                 ball_xy=(self._rim_cx, self._rim_cy),
@@ -293,7 +293,7 @@ class MadeDetector:
         if not self.active:
             return None
 
-        # Keep rim reference up to date when stabilized data is provided.
+        # Keep rim reference up to date when stabilized data is provided
         if rim_stable_center is not None:
             self._rim_cx, self._rim_cy = map(float, rim_stable_center)
 
@@ -311,13 +311,13 @@ class MadeDetector:
             self._y_line_from_bbox = bool(ctx0.y_line_from_bbox)
             self._scale = self._compute_scale()
 
-        # Accumulate ball evidence.
+        # Accumulate ball evidence
         if ball_state is not None:
             cx, cy = float(ball_state.cx), float(ball_state.cy)
             self._pts.append((frame_idx, cx, cy))
             self._last_ball_frame = frame_idx
 
-            # Descent detection (y increases downward in images).
+            # Descent detection (y increases downward in images)
             if self._last_cy is not None and (cy > self._last_cy + 1.5):
                 self._has_descended = True
             self._last_cy = cy
@@ -331,13 +331,13 @@ class MadeDetector:
                 below_rim_rel_y=self.below_rim_rel_y,
             )
 
-            # --- Scaled thresholds (pixel-based -> rim-size-based) ---
+            # Scaled thresholds (pixel-based -> rim-size-based)
             near_rim_dist = scale_px(self.near_rim_dist_px, self._scale)
             far_rim_dist = scale_px(self.far_rim_dist_px, self._scale)
             y_eps = scale_px(self.y_epsilon_px, self._scale)
             fb_eps = scale_px(self.fallback_extra_y_epsilon_px, self._scale)
 
-            # Center evidence: x close to rim center at least once in the window.
+            # Center evidence: x close to rim center at least once in the window
             x_thr = center_x_gate_thr(
                 self._rim_bbox,
                 self.center_gate_radius_rel,
@@ -347,7 +347,7 @@ class MadeDetector:
                 self._ever_center_evidence = True
                 self._dbg_center_hits_pts.append((cx, cy))
 
-            # Below-rim evidence: require consecutive frames below a line.
+            # Below-rim evidence: require consecutive frames below a line
             if ctx.below_line is not None:
                 if cy >= float(ctx.below_line):
                     self._below_rim_confirm += 1
@@ -359,7 +359,7 @@ class MadeDetector:
             if cy <= (self._rim_cy - 2.0):
                 self._ever_above_rim_center = True
 
-            # Near-rim evidence (used for grace + early miss).
+            # Near-rim evidence (used for grace + early miss)
             if near_rim_now(
                 ball_xy=(cx, cy),
                 rim_xy=(self._rim_cx, self._rim_cy),
@@ -370,7 +370,7 @@ class MadeDetector:
                 self._came_close_to_rim = True
                 self._last_near_rim_frame = frame_idx
 
-            # Early miss: ball approached and then moved far away after apex passed.
+            # Early miss: ball approached and then moved far away after apex passed
             dist_to_rim = float(ctx.dist_to_rim)
             if self._came_close_to_rim and (not self._passed_rim_plane) and (dist_to_rim >= far_rim_dist):
                 self._far_rim_count += 1
@@ -383,7 +383,7 @@ class MadeDetector:
                 return out
 
             # Detect rim-plane crossing once: above -> below y_line (scaled epsilon),
-            # and validate crossing x using rim gate.
+            # and validate crossing x using rim gate
             if len(self._pts) >= 2 and not self._passed_rim_plane:
                 y_line = float(self._y_line)
                 eps = float(y_eps + (0.0 if self._y_line_from_bbox else fb_eps))
@@ -411,7 +411,7 @@ class MadeDetector:
                         self._pass_details = f"pass_plane(x={x_cross:.1f})"
                         break
 
-            # Final MADE rule.
+            # Final MADE rule
             if (
                 self._has_descended
                 and self._passed_rim_plane
@@ -427,7 +427,7 @@ class MadeDetector:
                 self._reset()
                 return out
 
-            # Timeout -> MISS (only once the ball has started descending).
+            # Timeout -> MISS (only once the ball has started descending)
             elapsed = frame_idx - self._start_frame
             if elapsed >= self.window_frames and self._has_descended:
                 if elapsed < self.max_window_frames:

@@ -38,14 +38,14 @@ def compute_release(
     # sep_thr is optional: fallback to ctx.sep_thr
     sep_thr: Optional[float] = None,
 
-    # Motion release is OFF by default (safe)
+    # Motion release is OFF by default 
     enable_motion_release: bool = False,
     armed_clean: bool = True,
 
-    # canonical param name (internal)
+    # canonical param name 
     motion_ball_rel_y_max: float = 0.55,
 
-    # direct velocity params (optional)
+    # direct velocity params 
     vy: Optional[float] = None,
     vy_thr: Optional[float] = None,
 

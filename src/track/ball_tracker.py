@@ -202,7 +202,7 @@ class BallTracker:
             return None
 
         if self._last_smoothed is None:
-            # Bootstrap: no history -> highest confidence (tie-break by area)
+            # Bootstrap: no history -> highest confidence 
             return sorted(
                 ball_dets,
                 key=lambda d: (float(d.get("conf", 0.0)), self._bbox_area(d)),
@@ -220,7 +220,7 @@ class BallTracker:
             dist = self._dist((cx, cy), last_pos)
             conf = float(d.get("conf", 0.0))
             area = self._bbox_area(d)
-            scored.append((dist, -conf, -area, d))  # area desc
+            scored.append((dist, -conf, -area, d))  
 
         scored.sort(key=lambda t: (t[0], t[1], t[2]))
         best_dist, _, _, best_det = scored[0]

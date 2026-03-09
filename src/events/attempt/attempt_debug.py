@@ -73,7 +73,6 @@ def make_last_debug(
             "rel_y_rise": float(ctx.rel_y_rise),
             "scale": float(ctx.scale),
 
-            # Legacy alias used by some overlays
             "dist_thr": float(ctx.dist_thr),
         })
 
@@ -90,7 +89,6 @@ def make_last_debug(
             "vy_thr": release.vy_thr,
         })
 
-    # Arming bookkeeping (useful to interpret rel_y_rise / sep baseline)
     d.update({
         "armed_ball_rel_y": float(armed_ball_rel_y) if armed_ball_rel_y is not None else None,
         "armed_frame": int(armed_frame) if armed_frame is not None else None,

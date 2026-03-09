@@ -75,7 +75,7 @@ class AttemptDetector:
 
         # Rim memory horizon (frames)
         rim_recent_frames: int = 15,
-        ball_recent_frames: int = 25,  # kept for compatibility; not used directly here
+        ball_recent_frames: int = 25,  
         shoot_conf_min: float = 0.18,
 
         # FSM timing
@@ -110,13 +110,13 @@ class AttemptDetector:
         # Optional rim scaling (normalize pixel thresholds by rim size)
         enable_rim_scaling: bool = False,
         rim_ref_width_px: float | None = None,
-        rim_ref_w: float | None = None,  # backwards-compatible alias
+        rim_ref_w: float | None = None,  
         rim_scale_min: float = 0.6,
         rim_scale_max: float = 1.8,
 
         # Compatibility (BallPointResolver memory)
         ball_point_memory_frames: int = 6,
-        allow_oversize_ball_when_armed: bool = False,  # accepted for compatibility; not used here
+        allow_oversize_ball_when_armed: bool = False,  
         oversize_ball_conf_min: float = 0.20,
         oversize_ball_dist_boost: float = 1.35,
 
@@ -241,7 +241,7 @@ class AttemptDetector:
         self.last_debug: Dict[str, Any] = {}
 
     # -----------------
-    # small utilities (pure helpers)
+    # helpers
     # -----------------
     def _scale(self) -> float:
         """
@@ -529,7 +529,7 @@ class AttemptDetector:
             s = self._scale()
             sep_thr = float(self.release_sep_increase_px * s)
 
-            # sep_ok relies on a baseline distance at arming; both must be valid.
+            # sep_ok relies on a baseline distance at arming; both must be valid
             d_bp_safe = self._safe_dist(d_bp)
             armed_bp_safe = self._safe_dist(self._armed_dist_bp)
 
@@ -537,10 +537,10 @@ class AttemptDetector:
             if (d_bp_safe is not None) and (armed_bp_safe is not None):
                 raw_sep_ok = (d_bp_safe - armed_bp_safe) >= sep_thr
 
-            # Additional guard: require a minimal rise to avoid bbox jitter triggers.
+            # Additional guard: require a minimal rise to avoid bbox jitter triggers
             sep_ok = bool(raw_sep_ok and (rel_y_rise >= self.min_rel_y_rise_for_sep))
 
-            # Record the moment release became true (debug transparency).
+            # Record the moment release became true 
             if sep_ok and self._release_started_frame <= -10**8:
                 self._release_started_frame = int(frame_idx)
                 self._release_started_reason = "sep_ok"
@@ -566,7 +566,7 @@ class AttemptDetector:
                     self._waiting_below = True
                     self._below_streak = 0
 
-                # At trigger time, we require a recent rim reference to attach geometry.
+                # At trigger time, we require a recent rim reference to attach geometry
                 if self.last_rim_xy is None or (frame_idx - self.last_rim_frame) > self.rim_recent_frames:
                     dbg = make_last_debug(
                         frame_idx=frame_idx,
@@ -640,7 +640,7 @@ class AttemptDetector:
             self.last_debug = attach_fsm_counters(dbg, fsm=self.fsm)
             return None
 
-        # From this point, the "standard" path requires both person and shoot bbox.
+        # From this point, the "standard" path requires both person and shoot bbox
         if person_bbox is None or shoot_bbox is None:
             if self.fsm.state == AttemptFSM.ARMED:
                 self._clock_fsm_no_release(frame_idx)
@@ -781,7 +781,7 @@ class AttemptDetector:
 
         # Two arming modes:
         # - rise_arm_ok: prefer a true "rising edge" from a fresh detection
-        # - streak_arm_ok: tolerate missing rise by using a short shoot streak (robustness)
+        # - streak_arm_ok: tolerate missing rise by using a short shoot streak 
         streak_arm_ok = bool(
             (shoot_streak >= 2)
             and ctx.ball_in_shoot
@@ -871,7 +871,7 @@ class AttemptDetector:
             self._armed_via_rise = bool(rise_arm_ok)
             self._reset_release_started()
 
-        # If we fell back to IDLE, clear release snapshot.
+        # If we fell back to IDLE, clear release snapshot
         if prev_state != AttemptFSM.IDLE and self.fsm.state == AttemptFSM.IDLE:
             self._reset_release_started()
 
@@ -884,7 +884,7 @@ class AttemptDetector:
                 self._below_streak = 0
 
             # Do not emit an attempt if rim reference is too old:
-            # outcome classification needs consistent rim geometry.
+            # outcome classification needs consistent rim geometry
             if self.last_rim_xy is None or (frame_idx - self.last_rim_frame) > self.rim_recent_frames:
                 dbg = make_last_debug(
                     frame_idx=frame_idx,
@@ -950,7 +950,7 @@ class AttemptDetector:
                 ),
             )
 
-        # Default path: no event yet, report current status for overlays.
+        # Default path: no event yet, report current status for overlays
         dbg = make_last_debug(
             frame_idx=frame_idx,
             gate_reason=("armed_waiting_release" if self.fsm.state == AttemptFSM.ARMED else str(self.fsm.state)),
